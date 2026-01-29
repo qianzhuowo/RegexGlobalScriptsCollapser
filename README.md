@@ -7,6 +7,14 @@
 
 > 说明：分组展示仅影响“显示方式”，不改变 SillyTavern 内部的正则执行顺序。
 
+## 安装
+
+在酒馆的`安装拓展`界面输入以下url：
+
+```
+https://github.com/qianzhuowo/RegexGlobalScriptsCollapser
+```
+
 ## 功能
 
 ### 1) 全局正则折叠
@@ -31,13 +39,6 @@
     - 「全部展开 / 全部收纳」按钮
     - 「使用说明」按钮
 
-## 自动安装
-
-在酒馆的`安装拓展`界面输入以下url：
-
-```
-https://github.com/qianzhuowo/RegexGlobalScriptsCollapser
-```
 
 ## 手动安装
 
