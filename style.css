@@ -1,0 +1,215 @@
+/*
+  Regex Global Scripts Collapser
+
+  目标：
+  1) 把 #global_scripts_block 收纳（折叠/展开）
+  2) 为全局正则脚本列表 #saved_regex_scripts 增加“按组分类展示（可折叠）”功能
+
+  说明：
+  - 分组展示仅影响显示，不改变 SillyTavern 内部的正则执行顺序。
+  - 分组展示开启时，会禁用原生拖拽排序（仅禁用拖拽，其他按钮不影响）。
+*/
+
+/* header 样式：尽量贴合 ST 的风格 */
+#st-regex-gs-collapse-header {
+  user-select: none;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--mainColor, rgba(255, 255, 255, 0.2));
+  border-radius: 8px;
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
+}
+
+#st-regex-gs-collapse-header:hover {
+  filter: brightness(1.05);
+}
+
+#st-regex-gs-collapse-header .st-rgs-click-area {
+  cursor: pointer;
+}
+
+#st-regex-gs-collapse-header .st-rgs-controls {
+  margin-left: auto;
+}
+
+#st-regex-gs-collapse-header .st-rgs-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+}
+
+#st-regex-gs-collapse-header .st-rgs-arrow {
+  width: 16px;
+  display: inline-block;
+}
+
+#st-regex-gs-collapse-header .st-rgs-hint {
+  opacity: 0.65;
+  font-size: 0.9em;
+}
+
+#st-regex-gs-collapse-header .st-rgs-group-toggle {
+  opacity: 0.9;
+  gap: 4px;
+}
+
+#st-regex-gs-collapse-header .st-rgs-group-toggle span {
+  opacity: 0.85;
+  font-size: 0.95em;
+}
+
+/* 折叠逻辑：隐藏 block 中除了 header 外的所有直接子元素 */
+#global_scripts_block.st-rgs-collapsed> :not(#st-regex-gs-collapse-header) {
+  display: none !important;
+}
+
+/* =====================
+   分组展示：#saved_regex_scripts
+   ===================== */
+
+#saved_regex_scripts.st-rgs-grouping {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-group-header,
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 6px;
+  border: 1px solid var(--mainColor, rgba(255, 255, 255, 0.15));
+  border-radius: 6px;
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.15));
+}
+
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-group-header:hover,
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header:hover {
+  filter: brightness(1.05);
+}
+
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
+  margin-left: 12px;
+  opacity: 0.95;
+
+  /* 二级分组视觉区分 */
+  border-style: dashed;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.15)) 70%, transparent);
+}
+
+#saved_regex_scripts.st-rgs-grouping .st-rgs-group-arrow {
+  width: 16px;
+  display: inline-block;
+}
+
+/* 二级分组箭头淡一点 */
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header .st-rgs-group-arrow {
+  opacity: 0.85;
+}
+
+#saved_regex_scripts.st-rgs-grouping .st-rgs-group-count {
+  opacity: 0.7;
+  margin-left: 4px;
+}
+
+/* 一级组图钉 */
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin {
+  margin-left: auto;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin:hover {
+  opacity: 0.95;
+}
+
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"] {
+  opacity: 1;
+  color: var(--mainColor, #ffd54a);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.75));
+}
+
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin i {
+  transform: rotate(-30deg);
+}
+
+/* 缩进：脚本条目在组 header 之下 */
+#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="1"] {
+  margin-left: 12px;
+}
+
+#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="2"] {
+  margin-left: 24px;
+}
+
+/* 分组模式下：禁用拖拽手柄（仍保留可见性，以提示用户已禁用） */
+#saved_regex_scripts.st-rgs-grouping .drag-handle,
+#saved_regex_scripts.st-rgs-grouping .menu-handle {
+  pointer-events: none !important;
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 隐藏（用于折叠组） */
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-hidden {
+  display: none !important;
+}
+
+/* =====================
+   Help Modal
+   ===================== */
+
+#st-rgs-help-modal.st-rgs-hidden {
+  display: none !important;
+}
+
+#st-rgs-help-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+}
+
+#st-rgs-help-modal .st-rgs-help-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#st-rgs-help-modal .st-rgs-help-panel {
+  position: absolute;
+  top: 15vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(680px, calc(100vw - 24px));
+  max-height: 70vh;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--mainColor, rgba(255, 255, 255, 0.2));
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.65));
+}
+
+#st-rgs-help-modal .st-rgs-help-title {
+  margin-bottom: 10px;
+}
+
+#st-rgs-help-modal .st-rgs-help-body {
+  line-height: 1.5;
+}
+
+#st-rgs-help-modal .st-rgs-help-body code {
+  padding: 1px 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#st-rgs-help-modal .st-rgs-help-close {
+  min-width: 28px;
+  height: 28px;
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Regex Global Scripts Collapser",
+  "display_name": "酒馆正则分组 Regex Global Scripts Collapser",
+  "loading_order": 90,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Qianzhuo",
+  "version": "1.0.0",
+  "description": "Collapse/expand SillyTavern Regex 'Global Scripts' block, and optionally group global regex scripts for easier browsing (display-only)."
+}
