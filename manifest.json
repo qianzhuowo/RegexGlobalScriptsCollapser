@@ -5,6 +5,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Qianzhuo",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Collapse/expand SillyTavern Regex 'Global Scripts' block, and optionally group global regex scripts for easier browsing (display-only)."
 }
