@@ -1,9 +1,10 @@
 # Regex Global Scripts Collapser
 
-一个**独立的 SillyTavern 前端插件**，用于管理酒馆正则（Regex）界面里的全局正则脚本**Global Scripts** 区域：
+一个**独立的 SillyTavern 前端插件**，用于管理酒馆正则（Regex）界面里的全局正则脚本和预设区域：
 
-1. **Global Scripts 整块可点击收起/展开**
+1. **全局正则 Global Scripts 整块可点击收起/展开**
 2. **全局正则脚本列表支持按组分类展示与折叠**
+3. **对“预设正则（Preset Scripts）”同样生效**（折叠 + 分组）
 
 > 说明：分组展示仅影响“显示方式”，不改变 SillyTavern 内部的正则执行顺序。
 
@@ -17,13 +18,17 @@ https://github.com/qianzhuowo/RegexGlobalScriptsCollapser
 
 ## 功能
 
+<center>
+<video width="50%" controls loop>
+  <source src="https://stcard.pages.dev/examplepic/collapser示例视频.mp4" type="video/mp4">
+</video>
+</center>
+
 ### 1) 全局正则折叠
 
-![整体展开收起](整体展开收起.webp)
+### 2) 预设正则折叠
 
-### 2) 分组展示
-
-![分组展示](分组展示.webp)
+### 3) 分组展示
 
 - 支持根据脚本名**前缀**分组，最多二级：
   - `【常用】阡濯自制` → 组：`常用`

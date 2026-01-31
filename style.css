@@ -10,8 +10,10 @@
   - 分组展示开启时，会禁用原生拖拽排序（仅禁用拖拽，其他按钮不影响）。
 */
 
-/* header 样式：尽量贴合 ST 的风格 */
-#st-regex-gs-collapse-header {
+/* header 样式：尽量贴合 ST 的风格
+   (Global / Preset 两个面板共用)
+*/
+.st-rgs-header {
   user-select: none;
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -20,19 +22,19 @@
   background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
 }
 
-#st-regex-gs-collapse-header:hover {
+.st-rgs-header:hover {
   filter: brightness(1.05);
 }
 
-#st-regex-gs-collapse-header .st-rgs-click-area {
+.st-rgs-header .st-rgs-click-area {
   cursor: pointer;
 }
 
-#st-regex-gs-collapse-header .st-rgs-controls {
+.st-rgs-header .st-rgs-controls {
   margin-left: auto;
 }
 
-#st-regex-gs-collapse-header .st-rgs-icon-btn {
+.st-rgs-header .st-rgs-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -41,43 +43,50 @@
   padding: 0 6px;
 }
 
-#st-regex-gs-collapse-header .st-rgs-arrow {
+.st-rgs-header .st-rgs-arrow {
   width: 16px;
   display: inline-block;
 }
 
-#st-regex-gs-collapse-header .st-rgs-hint {
+.st-rgs-header .st-rgs-hint {
   opacity: 0.65;
   font-size: 0.9em;
 }
 
-#st-regex-gs-collapse-header .st-rgs-group-toggle {
+.st-rgs-header .st-rgs-group-toggle {
   opacity: 0.9;
   gap: 4px;
 }
 
-#st-regex-gs-collapse-header .st-rgs-group-toggle span {
+.st-rgs-header .st-rgs-group-toggle span {
   opacity: 0.85;
   font-size: 0.95em;
 }
 
-/* 折叠逻辑：隐藏 block 中除了 header 外的所有直接子元素 */
-#global_scripts_block.st-rgs-collapsed> :not(#st-regex-gs-collapse-header) {
+/* 折叠逻辑：隐藏 block 中除了 header 外的所有直接子元素
+   - global: #st-rgs-collapse-header-global
+   - preset: #st-rgs-collapse-header-preset
+*/
+#global_scripts_block.st-rgs-collapsed> :not(#st-rgs-collapse-header-global),
+#preset_scripts_block.st-rgs-collapsed> :not(#st-rgs-collapse-header-preset) {
   display: none !important;
 }
 
 /* =====================
-   分组展示：#saved_regex_scripts
+   分组展示：#saved_regex_scripts & #saved_preset_scripts
    ===================== */
 
-#saved_regex_scripts.st-rgs-grouping {
+#saved_regex_scripts.st-rgs-grouping,
+#saved_preset_scripts.st-rgs-grouping {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
 #saved_regex_scripts.st-rgs-grouping>.st-rgs-group-header,
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-group-header,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -90,11 +99,14 @@
 }
 
 #saved_regex_scripts.st-rgs-grouping>.st-rgs-group-header:hover,
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header:hover {
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header:hover,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-group-header:hover,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header:hover {
   filter: brightness(1.05);
 }
 
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
   margin-left: 12px;
   opacity: 0.95;
 
@@ -103,61 +115,73 @@
   background: color-mix(in srgb, var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.15)) 70%, transparent);
 }
 
-#saved_regex_scripts.st-rgs-grouping .st-rgs-group-arrow {
+#saved_regex_scripts.st-rgs-grouping .st-rgs-group-arrow,
+#saved_preset_scripts.st-rgs-grouping .st-rgs-group-arrow {
   width: 16px;
   display: inline-block;
 }
 
 /* 二级分组箭头淡一点 */
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header .st-rgs-group-arrow {
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header .st-rgs-group-arrow,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header .st-rgs-group-arrow {
   opacity: 0.85;
 }
 
-#saved_regex_scripts.st-rgs-grouping .st-rgs-group-count {
+#saved_regex_scripts.st-rgs-grouping .st-rgs-group-count,
+#saved_preset_scripts.st-rgs-grouping .st-rgs-group-count {
   opacity: 0.7;
   margin-left: 4px;
 }
 
 /* 一级组图钉 */
-#saved_regex_scripts.st-rgs-grouping .st-rgs-pin {
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin,
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin {
   margin-left: auto;
   opacity: 0.6;
   cursor: pointer;
 }
 
-#saved_regex_scripts.st-rgs-grouping .st-rgs-pin:hover {
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin:hover,
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin:hover {
   opacity: 0.95;
 }
 
-#saved_regex_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"] {
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"],
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"] {
   opacity: 1;
   color: var(--mainColor, #ffd54a);
   filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.75));
 }
 
-#saved_regex_scripts.st-rgs-grouping .st-rgs-pin i {
+#saved_regex_scripts.st-rgs-grouping .st-rgs-pin i,
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin i {
   transform: rotate(-30deg);
 }
 
 /* 缩进：脚本条目在组 header 之下 */
-#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="1"] {
+#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="1"],
+#saved_preset_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="1"] {
   margin-left: 12px;
 }
 
-#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="2"] {
+#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="2"],
+#saved_preset_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="2"] {
   margin-left: 24px;
 }
 
 /* 分组模式下：禁用拖拽手柄（仍保留可见性，以提示用户已禁用） */
 #saved_regex_scripts.st-rgs-grouping .drag-handle,
-#saved_regex_scripts.st-rgs-grouping .menu-handle {
+#saved_regex_scripts.st-rgs-grouping .menu-handle,
+#saved_preset_scripts.st-rgs-grouping .drag-handle,
+#saved_preset_scripts.st-rgs-grouping .menu-handle {
   pointer-events: none !important;
   opacity: 0.35;
   cursor: not-allowed;
 }
 
 /* 隐藏（用于折叠组） */
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-hidden {
+#saved_regex_scripts.st-rgs-grouping>.st-rgs-hidden,
+#saved_preset_scripts.st-rgs-grouping>.st-rgs-hidden {
   display: none !important;
 }
 
