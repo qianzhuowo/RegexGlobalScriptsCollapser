@@ -34,6 +34,42 @@
   margin-left: auto;
 }
 
+/* =====================
+   Header Settings (gear)
+   ===================== */
+
+.st-rgs-settings {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.st-rgs-settings-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1000;
+  min-width: 180px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--mainColor, rgba(255, 255, 255, 0.2));
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.75));
+}
+
+.st-rgs-settings-menu.st-rgs-hidden {
+  display: none !important;
+}
+
+.st-rgs-settings-menu .st-rgs-subgroup-toggle {
+  gap: 6px;
+  opacity: 0.95;
+}
+
+.st-rgs-settings-menu .st-rgs-subgroup-toggle span {
+  opacity: 0.9;
+  font-size: 0.95em;
+}
+
 .st-rgs-header .st-rgs-icon-btn {
   display: inline-flex;
   align-items: center;

@@ -157,7 +157,7 @@
             <li>以<code>【前缀名字】</code> 包裹的，例如 → <code>【常用】</code></li>
             <li>以<code>前缀名 与 减号"-"</code> 组合，例如 → <code>常用-</code></li>
           </ul>
-          <p><b>3) 分组规则（支持最多二级分类，两种前缀可混用）：</b></p>
+          <p><b>3) 分组规则（默认支持最多二级分类，可在设置里关闭二级，两种前缀可混用）：</b></p>
           <ul>
             <li><code>【常用】阡濯自制</code> → <code>常用</code></li>
             <li><code>文生图-测试1</code> → <code>文生图</code></li>
@@ -214,9 +214,12 @@
 
     // Header 上的快捷按钮（每个面板独立一套 ID，避免冲突）
     const GROUP_TOGGLE_ID = `st-rgs-group-toggle-${scope}`;
+    const SUBGROUP_TOGGLE_ID = `st-rgs-subgroup-toggle-${scope}`;
     const EXPAND_ALL_BTN_ID = `st-rgs-expand-all-${scope}`;
     const COLLAPSE_ALL_BTN_ID = `st-rgs-collapse-all-${scope}`;
     const HELP_BTN_ID = `st-rgs-help-btn-${scope}`;
+    const SETTINGS_BTN_ID = `st-rgs-settings-btn-${scope}`;
+    const SETTINGS_MENU_ID = `st-rgs-settings-menu-${scope}`;
 
     // 折叠状态持久化（按 scope 区分）
     const STORAGE_KEY_COLLAPSED = `${MODULE_NAME}:${scope}:collapsed`;
@@ -230,7 +233,11 @@
     // 一级分组置顶（图钉）持久化：string[]
     const STORAGE_KEY_PINNED_GROUPS = `${MODULE_NAME}:${scope}:pinnedGroups`;
 
+    // 是否启用二级分组（仅影响显示）
+    const STORAGE_KEY_SUBGROUP = `${MODULE_NAME}:${scope}:subgroup`;
+
     let groupingEnabled = loadBool(STORAGE_KEY_GROUPING, false);
+    let subgroupEnabled = loadBool(STORAGE_KEY_SUBGROUP, true);
     let groupCollapseState = loadJson(STORAGE_KEY_GROUP_COLLAPSE, {});
 
     const loadPinnedGroups = () => {
@@ -527,7 +534,7 @@
           const { groups } = parseGroupPath(displayName);
 
           const group1 = groups[0] || UNGROUPED_GROUP_NAME;
-          const group2 = groups[1] || '';
+          const group2 = subgroupEnabled ? (groups[1] || '') : '';
 
           itemEl.dataset.stRgsGroup1 = group1;
           if (group2) itemEl.dataset.stRgsGroup2 = group2;
@@ -607,26 +614,28 @@
             setFlexOrder(itemEl, base + 1 + i);
           }
 
-          // 二级组
-          for (let si = 0; si < gData.subOrder.length; si++) {
-            const group2 = gData.subOrder[si];
-            const subItems = gData.subMap.get(group2) || [];
+          // 二级组（可在设置中关闭）
+          if (subgroupEnabled) {
+            for (let si = 0; si < gData.subOrder.length; si++) {
+              const group2 = gData.subOrder[si];
+              const subItems = gData.subMap.get(group2) || [];
 
-            const subBase = base + (si + 1) * SUB_STEP;
+              const subBase = base + (si + 1) * SUB_STEP;
 
-            const subHeader = createGroupHeader({
-              level: 2,
-              group1,
-              group2,
-              title: group2,
-              count: subItems.length,
-              order: subBase,
-            });
-            listEl.appendChild(subHeader);
+              const subHeader = createGroupHeader({
+                level: 2,
+                group1,
+                group2,
+                title: group2,
+                count: subItems.length,
+                order: subBase,
+              });
+              listEl.appendChild(subHeader);
 
-            for (let i = 0; i < subItems.length; i++) {
-              const itemEl = subItems[i];
-              setFlexOrder(itemEl, subBase + 1 + i);
+              for (let i = 0; i < subItems.length; i++) {
+                const itemEl = subItems[i];
+                setFlexOrder(itemEl, subBase + 1 + i);
+              }
             }
           }
         }
@@ -921,6 +930,9 @@
         return false;
       }
 
+      // 每次尝试挂载时刷新设置（避免其他地方修改了 localStorage）
+      subgroupEnabled = loadBool(STORAGE_KEY_SUBGROUP, true);
+
       // 已经注入过就不重复注入
       const existingHeader = getHeaderEl();
       if (existingHeader) {
@@ -929,6 +941,9 @@
 
         const toggle = existingHeader.querySelector(`#${GROUP_TOGGLE_ID}`);
         if (toggle) toggle.checked = !!groupingEnabled;
+
+        const subgroupToggle = existingHeader.querySelector(`#${SUBGROUP_TOGGLE_ID}`);
+        if (subgroupToggle) subgroupToggle.checked = !!subgroupEnabled;
 
         ensureGroupingMounted();
         updateHeaderBulkButtonsState();
@@ -947,7 +962,7 @@
           <span class="st-rgs-hint">（点击收起/展开）</span>
         </div>
         <div class="st-rgs-controls flex-container flexGap10 alignItemsCenter">
-          <label class="checkbox flex-container alignItemsCenter st-rgs-group-toggle" title="按前缀分组展示（最多二级），并在分组时禁用拖拽排序">
+          <label class="checkbox flex-container alignItemsCenter st-rgs-group-toggle" title="按前缀分组展示（一级/二级可选），并在分组时禁用拖拽排序">
             <input type="checkbox" id="${GROUP_TOGGLE_ID}">
             <span>分组</span>
           </label>
@@ -961,6 +976,18 @@
           <button type="button" class="menu_button interactable st-rgs-icon-btn" id="${HELP_BTN_ID}" title="使用说明" aria-label="使用说明">
             <span class="fa-solid fa-circle-info"></span>
           </button>
+
+          <div class="st-rgs-settings">
+            <button type="button" class="menu_button interactable st-rgs-icon-btn" id="${SETTINGS_BTN_ID}" title="设置" aria-label="设置">
+              <span class="fa-solid fa-gear"></span>
+            </button>
+            <div class="st-rgs-settings-menu st-rgs-hidden" id="${SETTINGS_MENU_ID}" role="menu">
+              <label class="checkbox flex-container alignItemsCenter st-rgs-subgroup-toggle" title="开启后，支持从脚本名前缀解析第二级分组（例如：文生图-【常用】xxx）">
+                <input type="checkbox" id="${SUBGROUP_TOGGLE_ID}">
+                <span>启用二级分类</span>
+              </label>
+            </div>
+          </div>
         </div>
       `;
 
@@ -998,10 +1025,71 @@
         });
       }
 
-      // 全部展开 / 全部收纳 / 说明
+      // 全部展开 / 全部收纳 / 说明 / 设置
       const expandAllBtn = header.querySelector(`#${EXPAND_ALL_BTN_ID}`);
       const collapseAllBtn = header.querySelector(`#${COLLAPSE_ALL_BTN_ID}`);
       const helpBtn = header.querySelector(`#${HELP_BTN_ID}`);
+      const settingsBtn = header.querySelector(`#${SETTINGS_BTN_ID}`);
+      const settingsMenu = header.querySelector(`#${SETTINGS_MENU_ID}`);
+      const subgroupToggle = header.querySelector(`#${SUBGROUP_TOGGLE_ID}`);
+
+      const closeSettingsMenu = () => {
+        if (!settingsMenu) return;
+        settingsMenu.classList.add('st-rgs-hidden');
+      };
+
+      const toggleSettingsMenu = () => {
+        if (!settingsMenu) return;
+        settingsMenu.classList.toggle('st-rgs-hidden');
+      };
+
+      // 设置菜单：阻止冒泡，避免触发整体收起
+      settingsBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSettingsMenu();
+      });
+      settingsMenu?.addEventListener('click', (e) => e.stopPropagation());
+
+      if (subgroupToggle) {
+        subgroupToggle.checked = !!subgroupEnabled;
+        subgroupToggle.addEventListener('click', (e) => e.stopPropagation());
+        subgroupToggle.addEventListener('change', (e) => {
+          e.stopPropagation();
+          subgroupEnabled = !!subgroupToggle.checked;
+          saveBool(STORAGE_KEY_SUBGROUP, subgroupEnabled);
+
+          // 开关变化时，如果正在分组展示，则立即重建
+          if (groupingEnabled) {
+            const listEl = getScriptsListEl();
+            if (listEl) applyGrouping(listEl);
+          }
+        });
+      }
+
+      // 点击空白处关闭设置菜单
+      const docCloseHandler = (e) => {
+        if (!settingsMenu || !settingsBtn || !settingsMenu.isConnected || !settingsBtn.isConnected) {
+          document.removeEventListener('click', docCloseHandler, true);
+          document.removeEventListener('keydown', docEscHandler, true);
+          return;
+        }
+
+        if (settingsMenu.classList.contains('st-rgs-hidden')) return;
+
+        const inMenu = e.target?.closest?.(`#${SETTINGS_MENU_ID}`);
+        const inBtn = e.target?.closest?.(`#${SETTINGS_BTN_ID}`);
+        if (inMenu || inBtn) return;
+
+        closeSettingsMenu();
+      };
+
+      const docEscHandler = (e) => {
+        if (e.key === 'Escape') closeSettingsMenu();
+      };
+
+      document.addEventListener('click', docCloseHandler, true);
+      document.addEventListener('keydown', docEscHandler, true);
 
       expandAllBtn?.addEventListener('click', (e) => {
         e.preventDefault();
