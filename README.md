@@ -18,11 +18,7 @@ https://github.com/qianzhuowo/RegexGlobalScriptsCollapser
 
 ## 功能
 
-<center>
-<video width="50%" controls loop>
-  <source src="https://stcard.pages.dev/examplepic/collapser示例视频.mp4" type="video/mp4">
-</video>
-</center>
+<video src="https://github.com/user-attachments/assets/6e2060c3-8eb1-4d54-b452-dbf72cbdf7e3.mp4" controls="controls" width="80%" loop></video>
 
 ### 1) 全局正则折叠
 
