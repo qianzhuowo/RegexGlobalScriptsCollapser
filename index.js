@@ -15,9 +15,51 @@
   // 分组展示模式 class
   const GROUPING_CLASS = 'st-rgs-grouping';
   const HIDDEN_CLASS = 'st-rgs-hidden';
+  const NEW_GROUP_HIGHLIGHT_CLASS = 'st-rgs-new-group';
+  const NEW_GROUP_ATTENTION_HIGHLIGHT_CLASS = 'st-rgs-new-group-attention';
+  const NEW_ITEM_HIGHLIGHT_CLASS = 'st-rgs-new-item';
+
+  // 折叠时用于识别“插件 header / 需要保留的原生元素”
+  const COLLAPSE_HEADER_DATA_KEY = 'stRgsHeader';
+  const COLLAPSE_PRESERVE_DATA_KEY = 'stRgsPreserveOnCollapse';
 
   // 使用说明弹窗（全局复用一个）
   const HELP_MODAL_ID = 'st-rgs-help-modal';
+  const SEARCH_HIDDEN_CLASS = 'st-rgs-search-hidden';
+  const SEARCH_BAR_ID = 'st-rgs-search-bar';
+  const SEARCH_INPUT_ID = 'st-rgs-search-input';
+  const SEARCH_CLEAR_ID = 'st-rgs-search-clear';
+  const REGEX_PAGE_HIDE_WRAPPER_ID = 'st-rgs-regex-hide-settings-anchor';
+  const REGEX_PAGE_HIDE_BUTTON_ID = 'st-rgs-regex-hide-settings-trigger';
+  const REGEX_PAGE_HIDE_MENU_ID = 'st-rgs-regex-hide-settings-menu';
+  const REGEX_PAGE_FORCE_HIDDEN_CLASS = 'st-rgs-force-hidden';
+  const REGEX_PAGE_HIDE_STORAGE_KEY = `${MODULE_NAME}:regexPageHiddenTargets`;
+  const REGEX_PAGE_HIDE_TARGETS = [
+    {
+      key: 'open_regex_editor',
+      selector: '#open_regex_editor',
+      label: '隐藏“新建全局正则”',
+      category: 'toolbar',
+    },
+    {
+      key: 'open_preset_editor', selector: '#open_preset_editor', label: '隐藏“新建预设正则”', category: 'toolbar' },
+    {
+      key: 'open_scoped_editor', selector: '#open_scoped_editor', label: '隐藏“新建局部正则”', category: 'toolbar' },
+    { key: 'import_regex', selector: '#import_regex', label: '隐藏“导入正则”', category: 'toolbar' },
+    {
+      key: 'regex_bulk_edit',
+      selector: 'label[for="regex_bulk_edit"]',
+      label: '隐藏“批量编辑”',
+      category: 'toolbar',
+    },
+    { key: 'open_regex_debugger', selector: '#open_regex_debugger', label: '隐藏“调试工具”', category: 'toolbar' },
+    { key: 'regex_presets_block', selector: '#regex_presets_block', label: '隐藏正则预设区域', category: 'block' },
+  ];
+
+  let sharedSearchQuery = '';
+  const sharedSearchListeners = new Set();
+  let regexPageHideObserver = null;
+  let regexPageHideDocHandlersBound = false;
 
   function log(...args) {
     console.log(`[${MODULE_NAME}]`, ...args);
@@ -76,6 +118,63 @@
     }
   }
 
+  function normalizeHideConfig(rawConfig) {
+    const source = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const normalized = {};
+
+    for (const target of REGEX_PAGE_HIDE_TARGETS) {
+      normalized[target.key] = !!source[target.key];
+    }
+
+    return normalized;
+  }
+
+  function loadHideConfig() {
+    return normalizeHideConfig(loadJson(REGEX_PAGE_HIDE_STORAGE_KEY, {}));
+  }
+
+  function hashString(input) {
+    const str = String(input ?? '');
+    let hash = 2166136261;
+
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+
+    return (hash >>> 0).toString(36);
+  }
+
+  function saveHideConfig(config) {
+    saveJson(REGEX_PAGE_HIDE_STORAGE_KEY, normalizeHideConfig(config));
+  }
+
+  function arrayShallowEqual(a, b) {
+    if (a === b) return true;
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  function flashElement(el, className, durationMs = 1600) {
+    if (!el?.classList || !className) return;
+
+    const token = `${Date.now()}-${Math.random()}`;
+    el.dataset.stRgsFlashToken = token;
+
+    el.classList.remove(className);
+    void el.offsetWidth;
+    el.classList.add(className);
+
+    setTimeout(() => {
+      if (el.dataset.stRgsFlashToken !== token) return;
+      el.classList.remove(className);
+    }, durationMs);
+  }
+
   function toastInfo(message) {
     try {
       if (window.toastr?.info) {
@@ -86,6 +185,397 @@
       // ignore
     }
     log(message);
+  }
+
+  function normalizeSearchText(input) {
+    const base = String(input ?? '').trim();
+    const normalized = typeof base.normalize === 'function' ? base.normalize('NFKC') : base;
+    return normalized.toLocaleLowerCase();
+  }
+
+  function compactSearchText(input) {
+    return normalizeSearchText(input).replace(/[\s\-‐‑‒–—―_./\\|【】\[\]()（）{}「」『』"'`~!@#$%^&*+=:;?,，。！？：；、<>《》]/g, '');
+  }
+
+  function fuzzyMatches(text, query) {
+    const normalizedQuery = compactSearchText(query);
+    if (!normalizedQuery) return true;
+
+    const normalizedText = compactSearchText(text);
+    if (!normalizedText) return false;
+    if (normalizedText.includes(normalizedQuery)) return true;
+
+    let fromIndex = 0;
+    for (const ch of normalizedQuery) {
+      fromIndex = normalizedText.indexOf(ch, fromIndex);
+      if (fromIndex < 0) return false;
+      fromIndex += 1;
+    }
+
+    return true;
+  }
+
+  function getSharedSearchQuery() {
+    return sharedSearchQuery;
+  }
+
+  function subscribeSharedSearch(listener) {
+    if (typeof listener !== 'function') return () => {};
+    sharedSearchListeners.add(listener);
+    listener(sharedSearchQuery);
+    return () => sharedSearchListeners.delete(listener);
+  }
+
+  function setSharedSearchQuery(nextQuery) {
+    const next = String(nextQuery ?? '');
+    if (next === sharedSearchQuery) return;
+    sharedSearchQuery = next;
+
+    for (const listener of Array.from(sharedSearchListeners)) {
+      try {
+        listener(sharedSearchQuery);
+      } catch (err) {
+        warn('shared search listener failed', err);
+      }
+    }
+  }
+
+  function ensureSearchBar() {
+    const globalBlockEl = document.getElementById('global_scripts_block');
+    if (!globalBlockEl) return false;
+
+    let searchBarEl = document.getElementById(SEARCH_BAR_ID);
+    if (!searchBarEl) {
+      searchBarEl = document.createElement('div');
+      searchBarEl.id = SEARCH_BAR_ID;
+      searchBarEl.className = 'st-rgs-search-bar flex-container flexGap10 alignItemsCenter';
+      searchBarEl.innerHTML = `
+        <span class="fa-solid fa-magnifying-glass st-rgs-search-icon" aria-hidden="true"></span>
+        <input id="${SEARCH_INPUT_ID}" class="text_pole st-rgs-search-input flex1" type="text" placeholder="搜索全局 / 预设 / 局部正则名称（支持模糊搜索）" autocomplete="off">
+        <button type="button" class="menu_button interactable st-rgs-icon-btn st-rgs-search-clear" id="${SEARCH_CLEAR_ID}" title="清空搜索" aria-label="清空搜索">✕</button>
+      `;
+
+      const inputEl = searchBarEl.querySelector(`#${SEARCH_INPUT_ID}`);
+      const clearBtn = searchBarEl.querySelector(`#${SEARCH_CLEAR_ID}`);
+
+      inputEl?.addEventListener('input', () => {
+        setSharedSearchQuery(inputEl.value);
+        if (clearBtn) clearBtn.disabled = !normalizeSearchText(inputEl.value);
+      });
+
+      clearBtn?.addEventListener('click', () => {
+        if (!inputEl) return;
+        inputEl.value = '';
+        clearBtn.disabled = true;
+        setSharedSearchQuery('');
+        inputEl.focus();
+      });
+    }
+
+    if (searchBarEl.parentElement !== globalBlockEl.parentElement || searchBarEl.nextElementSibling !== globalBlockEl) {
+      globalBlockEl.insertAdjacentElement('beforebegin', searchBarEl);
+    }
+
+    const inputEl = searchBarEl.querySelector(`#${SEARCH_INPUT_ID}`);
+    const clearBtn = searchBarEl.querySelector(`#${SEARCH_CLEAR_ID}`);
+    if (inputEl && inputEl.value !== sharedSearchQuery) inputEl.value = sharedSearchQuery;
+    if (clearBtn) clearBtn.disabled = !normalizeSearchText(sharedSearchQuery);
+    return true;
+  }
+
+  function getRegexActionToolbarEl() {
+    return document.getElementById('open_regex_editor')?.closest?.('.flex-container') || null;
+  }
+
+  function getRegexActionSeparatorEl(toolbarEl = getRegexActionToolbarEl()) {
+    let prevEl = toolbarEl?.previousElementSibling || null;
+    while (prevEl && prevEl.tagName === 'BR') prevEl = prevEl.previousElementSibling;
+    return prevEl?.tagName === 'HR' ? prevEl : null;
+  }
+
+  function resolveRegexHideTargetEl(target) {
+    if (!target?.selector) return null;
+    return document.querySelector(target.selector);
+  }
+
+  function syncRegexHideMenuInputs() {
+    const menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
+    if (!menuEl) return;
+
+    const config = loadHideConfig();
+    for (const target of REGEX_PAGE_HIDE_TARGETS) {
+      const inputEl = menuEl.querySelector(`[data-st-rgs-hide-target="${target.key}"]`);
+      const optionEl = menuEl.querySelector(`[data-st-rgs-hide-option="${target.key}"]`);
+      if (!inputEl) continue;
+      inputEl.checked = !!config[target.key];
+      optionEl?.setAttribute('aria-checked', config[target.key] ? 'true' : 'false');
+    }
+  }
+
+  function setRegexHideTargetEnabled(targetKey, enabled) {
+    if (!targetKey) return;
+
+    const config = loadHideConfig();
+    if (!Object.prototype.hasOwnProperty.call(config, targetKey)) return;
+
+    config[targetKey] = !!enabled;
+    saveHideConfig(config);
+    syncRegexHideMenuInputs();
+    applyRegexPageHideConfig();
+  }
+
+  function toggleRegexHideTarget(targetKey) {
+    const config = loadHideConfig();
+    setRegexHideTargetEnabled(targetKey, !config[targetKey]);
+  }
+
+  function setRegexHideMenuOpen(open) {
+    const menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
+    const triggerEl = document.getElementById(REGEX_PAGE_HIDE_BUTTON_ID);
+    if (!menuEl || !triggerEl) return;
+
+    if (open) {
+      syncRegexHideMenuInputs();
+      positionRegexHideMenu(menuEl, triggerEl);
+    }
+
+    menuEl.classList.toggle('st-rgs-hidden', !open);
+    triggerEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  function closeRegexHideMenu() {
+    setRegexHideMenuOpen(false);
+  }
+
+  function positionRegexHideMenu(menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID), triggerEl = document.getElementById(REGEX_PAGE_HIDE_BUTTON_ID)) {
+    if (!menuEl || !triggerEl) return;
+
+    const wasHidden = menuEl.classList.contains('st-rgs-hidden');
+    const previousVisibility = menuEl.style.visibility;
+
+    if (wasHidden) {
+      menuEl.classList.remove('st-rgs-hidden');
+      menuEl.style.visibility = 'hidden';
+    }
+
+    menuEl.style.left = '0px';
+    menuEl.style.top = '0px';
+
+    const triggerRect = triggerEl.getBoundingClientRect();
+    const menuRect = menuEl.getBoundingClientRect();
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const screenPadding = 8;
+    const gap = 6;
+
+    let left = triggerRect.right - menuRect.width;
+    left = Math.min(left, Math.max(screenPadding, viewportWidth - menuRect.width - screenPadding));
+    left = Math.max(screenPadding, left);
+
+    let top = triggerRect.bottom + gap;
+    if (top + menuRect.height > viewportHeight - screenPadding) {
+      const topAbove = triggerRect.top - menuRect.height - gap;
+      top = topAbove >= screenPadding ? topAbove : Math.max(screenPadding, viewportHeight - menuRect.height - screenPadding);
+    }
+
+    menuEl.style.left = `${Math.round(left)}px`;
+    menuEl.style.top = `${Math.round(top)}px`;
+
+    if (wasHidden) {
+      menuEl.classList.add('st-rgs-hidden');
+      menuEl.style.visibility = previousVisibility;
+    } else {
+      menuEl.style.visibility = previousVisibility || '';
+    }
+  }
+
+  function applyRegexPageHideConfig() {
+    const config = loadHideConfig();
+    let visibleToolbarTargetCount = 0;
+
+    for (const target of REGEX_PAGE_HIDE_TARGETS) {
+      const targetEl = resolveRegexHideTargetEl(target);
+      if (!targetEl) continue;
+
+      const shouldHide = !!config[target.key];
+      targetEl.classList.toggle(REGEX_PAGE_FORCE_HIDDEN_CLASS, shouldHide);
+
+      if (target.category === 'toolbar' && !shouldHide) {
+        visibleToolbarTargetCount += 1;
+      }
+    }
+
+    const separatorEl = getRegexActionSeparatorEl();
+    if (separatorEl) {
+      separatorEl.classList.toggle(REGEX_PAGE_FORCE_HIDDEN_CLASS, visibleToolbarTargetCount < 1);
+    }
+  }
+
+  function ensureRegexHideDocHandlers() {
+    if (regexPageHideDocHandlersBound) return;
+    regexPageHideDocHandlersBound = true;
+
+    document.addEventListener(
+      'click',
+      (e) => {
+        const menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
+        const triggerEl = document.getElementById(REGEX_PAGE_HIDE_BUTTON_ID);
+        if (!menuEl || !triggerEl || menuEl.classList.contains('st-rgs-hidden')) return;
+
+        const inMenu = e.target?.closest?.(`#${REGEX_PAGE_HIDE_MENU_ID}`);
+        const inTrigger = e.target?.closest?.(`#${REGEX_PAGE_HIDE_BUTTON_ID}`);
+        if (inMenu || inTrigger) return;
+
+        closeRegexHideMenu();
+      },
+      true
+    );
+
+    document.addEventListener(
+      'keydown',
+      (e) => {
+        if (e.key === 'Escape') closeRegexHideMenu();
+      },
+      true
+    );
+
+    window.addEventListener(
+      'resize',
+      () => {
+        const menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
+        if (!menuEl || menuEl.classList.contains('st-rgs-hidden')) return;
+        positionRegexHideMenu(menuEl);
+      },
+      true
+    );
+  }
+
+  function ensureRegexHideControls() {
+    const toolbarEl = getRegexActionToolbarEl();
+    if (!toolbarEl) {
+      applyRegexPageHideConfig();
+      return false;
+    }
+
+    let wrapperEl = document.getElementById(REGEX_PAGE_HIDE_WRAPPER_ID);
+    if (!wrapperEl || wrapperEl.parentElement !== toolbarEl) {
+      wrapperEl?.remove?.();
+
+      wrapperEl = document.createElement('div');
+      wrapperEl.id = REGEX_PAGE_HIDE_WRAPPER_ID;
+      wrapperEl.className = 'st-rgs-native-hide-anchor';
+      wrapperEl.innerHTML = `
+        <div id="${REGEX_PAGE_HIDE_BUTTON_ID}" class="menu_button menu_button_icon interactable" title="隐藏设置" tabindex="0" role="button" aria-haspopup="true" aria-expanded="false">
+          <i class="fa-solid fa-eye-slash"></i>
+          <small>隐藏设置</small>
+        </div>
+      `;
+
+      toolbarEl.appendChild(wrapperEl);
+
+      let menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
+      if (!menuEl) {
+        menuEl = document.createElement('div');
+        menuEl.className = 'st-rgs-native-hide-menu st-rgs-hidden';
+        menuEl.id = REGEX_PAGE_HIDE_MENU_ID;
+        menuEl.setAttribute('role', 'menu');
+        menuEl.innerHTML = `
+          <div class="st-rgs-native-hide-title">隐藏以下区域</div>
+          ${REGEX_PAGE_HIDE_TARGETS.map(
+            (target) => `
+              <div class="checkbox flex-container alignItemsCenter st-rgs-native-hide-toggle" data-st-rgs-hide-option="${target.key}" role="menuitemcheckbox" aria-checked="false" tabindex="0">
+                <input type="checkbox" data-st-rgs-hide-target="${target.key}" tabindex="-1" aria-hidden="true">
+                <span>${target.label}</span>
+              </div>
+            `
+          ).join('')}
+        `;
+        document.body.appendChild(menuEl);
+      }
+
+      const triggerEl = wrapperEl.querySelector(`#${REGEX_PAGE_HIDE_BUTTON_ID}`);
+      menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
+
+      const toggleMenu = () => {
+        const nextOpen = menuEl?.classList.contains('st-rgs-hidden');
+        setRegexHideMenuOpen(!!nextOpen);
+      };
+
+      triggerEl?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleMenu();
+      });
+
+      triggerEl?.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        toggleMenu();
+      });
+
+      const stopMenuEvent = (e) => e.stopPropagation();
+      menuEl?.addEventListener('pointerdown', stopMenuEvent);
+      menuEl?.addEventListener('mousedown', stopMenuEvent);
+      menuEl?.addEventListener('mouseup', stopMenuEvent);
+      menuEl?.addEventListener('click', (e) => e.stopPropagation());
+      menuEl?.addEventListener('click', (e) => {
+        const optionEl = e.target?.closest?.('[data-st-rgs-hide-option]');
+        if (!optionEl) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        toggleRegexHideTarget(optionEl.dataset.stRgsHideOption);
+      });
+      menuEl?.addEventListener('keydown', (e) => {
+        const optionEl = e.target?.closest?.('[data-st-rgs-hide-option]');
+        if (!optionEl) {
+          e.stopPropagation();
+          return;
+        }
+
+        if (e.key !== 'Enter' && e.key !== ' ') {
+          e.stopPropagation();
+          return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+        toggleRegexHideTarget(optionEl.dataset.stRgsHideOption);
+      });
+      menuEl?.addEventListener('change', (e) => {
+        const inputEl = e.target?.closest?.('input[data-st-rgs-hide-target]');
+        if (!inputEl) return;
+        e.stopPropagation();
+        setRegexHideTargetEnabled(inputEl.dataset.stRgsHideTarget, !!inputEl.checked);
+      });
+    }
+
+    ensureRegexHideDocHandlers();
+    syncRegexHideMenuInputs();
+    positionRegexHideMenu();
+    applyRegexPageHideConfig();
+    return true;
+  }
+
+  function startRegexHideObserver() {
+    if (regexPageHideObserver) return;
+    if (typeof MutationObserver !== 'function') return;
+
+    const root = document.body || document.documentElement;
+    if (!root) return;
+
+    let scheduled = false;
+    regexPageHideObserver = new MutationObserver(() => {
+      if (scheduled) return;
+      scheduled = true;
+      schedule(() => {
+        scheduled = false;
+        ensureRegexHideControls();
+      });
+    });
+
+    regexPageHideObserver.observe(root, { childList: true, subtree: true });
   }
 
   function makeGroupKey(group1, group2) {
@@ -151,7 +641,7 @@
           <button type="button" class="menu_button interactable st-rgs-help-close" data-st-rgs-help-close title="关闭">✕</button>
         </div>
         <div class="st-rgs-help-body">
-          <p><b>1) 开启分组：</b>在标题右侧勾选「分组」。</p>
+          <p><b>1) 开启分组：</b>点击标题右侧的「未分组 / 分组」按钮切换，启用时会显示高亮与勾选图标。</p>
           <p><b>2) 支持两种前缀：</b></p>
           <ul>
             <li>以<code>【前缀名字】</code> 包裹的，例如 → <code>【常用】</code></li>
@@ -208,7 +698,7 @@
   // Panel Controller (per block)
   // =====================
 
-  function createPanelController({ scope, blockId, listId, titleText }) {
+  function createPanelController({ scope, blockId, listId, titleText, preserveSelectors = [] }) {
     // 本插件注入的 header 按钮 ID（用于防重复）
     const HEADER_ID = `st-rgs-collapse-header-${scope}`;
 
@@ -236,9 +726,24 @@
     // 是否启用二级分组（仅影响显示）
     const STORAGE_KEY_SUBGROUP = `${MODULE_NAME}:${scope}:subgroup`;
 
+    // 真实脚本顺序快照（用于在酒馆重绘/重启后尽量维持稳定显示顺序）
+    const STORAGE_KEY_ITEM_ORDER = `${MODULE_NAME}:${scope}:itemOrder`;
+
     let groupingEnabled = loadBool(STORAGE_KEY_GROUPING, false);
     let subgroupEnabled = loadBool(STORAGE_KEY_SUBGROUP, true);
     let groupCollapseState = loadJson(STORAGE_KEY_GROUP_COLLAPSE, {});
+    let collapsedState = loadBool(STORAGE_KEY_COLLAPSED, false);
+    let searchQuery = getSharedSearchQuery();
+
+    const loadItemOrder = () => {
+      const val = loadJson(STORAGE_KEY_ITEM_ORDER, []);
+      return Array.isArray(val) ? val.filter((x) => typeof x === 'string' && x) : [];
+    };
+
+    const saveItemOrder = (value) => {
+      itemOrderState = value;
+      saveJson(STORAGE_KEY_ITEM_ORDER, value);
+    };
 
     const loadPinnedGroups = () => {
       const val = loadJson(STORAGE_KEY_PINNED_GROUPS, []);
@@ -246,6 +751,22 @@
     };
 
     let pinnedGroup1List = loadPinnedGroups();
+    let itemOrderState = loadItemOrder();
+
+    subscribeSharedSearch((nextQuery) => {
+      searchQuery = String(nextQuery ?? '');
+
+      const blockEl = getBlockEl();
+      if (blockEl) applyBlockCollapsedState(blockEl);
+
+      const listEl = getScriptsListEl();
+      if (!listEl || !listEl.isConnected) return;
+
+      if (groupingEnabled && listEl.classList.contains(GROUPING_CLASS)) applyGroupVisibility(listEl);
+      else applyPlainSearchVisibility(listEl);
+
+      updateHeaderBulkButtonsState();
+    });
 
     function getBlockEl() {
       return document.getElementById(blockId);
@@ -259,36 +780,93 @@
       return document.getElementById(listId);
     }
 
+    function refreshCollapsePreservedElements(blockEl) {
+      if (!blockEl?.children) return;
+
+      for (const child of Array.from(blockEl.children)) {
+        if (child?.dataset && COLLAPSE_PRESERVE_DATA_KEY in child.dataset) {
+          delete child.dataset[COLLAPSE_PRESERVE_DATA_KEY];
+        }
+      }
+
+      for (const selector of preserveSelectors) {
+        if (!selector) continue;
+
+        const targetEl = blockEl.querySelector(selector);
+        if (!targetEl) continue;
+
+        let directChild = targetEl;
+        while (directChild && directChild.parentElement !== blockEl) {
+          directChild = directChild.parentElement;
+        }
+
+        if (directChild?.parentElement === blockEl && directChild?.dataset) {
+          directChild.dataset[COLLAPSE_PRESERVE_DATA_KEY] = '1';
+        }
+      }
+    }
+
     // === block 折叠 ===
 
-    function setCollapsed(blockEl, collapsed) {
+    function hasActiveSearchQuery() {
+      return !!normalizeSearchText(searchQuery);
+    }
+
+    function applyBlockCollapsedState(blockEl) {
       if (!blockEl) return;
 
-      if (collapsed) {
+      refreshCollapsePreservedElements(blockEl);
+
+      const searchActive = hasActiveSearchQuery();
+      const effectiveCollapsed = collapsedState && !searchActive;
+
+      if (effectiveCollapsed) {
         blockEl.classList.add(COLLAPSED_CLASS);
-        blockEl.dataset.stRgsCollapsed = '1';
       } else {
         blockEl.classList.remove(COLLAPSED_CLASS);
-        blockEl.dataset.stRgsCollapsed = '0';
       }
+
+      blockEl.dataset.stRgsCollapsed = collapsedState ? '1' : '0';
+      blockEl.dataset.stRgsSearchActive = searchActive ? '1' : '0';
 
       // 同步 header 的显示状态
       const header = getHeaderEl();
       if (header) {
         const arrow = header.querySelector('[data-st-rgs-arrow]');
         if (arrow) {
-          arrow.textContent = collapsed ? '▶' : '▼';
+          arrow.textContent = effectiveCollapsed ? '▶' : '▼';
         }
 
         const toggleArea = header.querySelector('[data-st-rgs-collapse-toggle]');
-        (toggleArea || header).setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        (toggleArea || header).setAttribute('aria-expanded', effectiveCollapsed ? 'false' : 'true');
       }
-
-      saveBool(STORAGE_KEY_COLLAPSED, collapsed);
     }
 
-    function getCollapsed(blockEl) {
-      return blockEl?.dataset?.stRgsCollapsed === '1' || blockEl?.classList?.contains(COLLAPSED_CLASS);
+    function setCollapsed(blockEl, collapsed) {
+      collapsedState = !!collapsed;
+      if (!blockEl) return;
+
+      applyBlockCollapsedState(blockEl);
+      saveBool(STORAGE_KEY_COLLAPSED, collapsedState);
+    }
+
+    function getCollapsed() {
+      return collapsedState;
+    }
+
+    function itemMatchesSearch(itemEl) {
+      return fuzzyMatches(getScriptDisplayName(itemEl), searchQuery);
+    }
+
+    function applyPlainSearchVisibility(listEl) {
+      if (!listEl) return;
+      const searchActive = hasActiveSearchQuery();
+
+      for (const itemEl of getScriptItemEls(listEl)) {
+        const matched = !searchActive || itemMatchesSearch(itemEl);
+        itemEl.dataset.stRgsSearchMatch = matched ? '1' : '0';
+        itemEl.classList.toggle(SEARCH_HIDDEN_CLASS, !matched);
+      }
     }
 
     // === 分组展示 ===
@@ -314,6 +892,117 @@
       return (title || '').trim();
     }
 
+    function getScriptIdentityBaseKey(itemEl) {
+      const explicitId = [
+        itemEl?.dataset?.scriptId,
+        itemEl?.dataset?.regexScriptId,
+        itemEl?.dataset?.regexId,
+        itemEl?.dataset?.id,
+        itemEl?.getAttribute?.('data-script-id'),
+        itemEl?.getAttribute?.('data-regex-script-id'),
+        itemEl?.getAttribute?.('data-regex-id'),
+        itemEl?.getAttribute?.('data-id'),
+        itemEl?.id,
+      ].find((value) => !!value);
+
+      if (explicitId) return `id:${String(explicitId).trim()}`;
+
+      const name = getScriptDisplayName(itemEl);
+      const fieldFingerprints = Array.from(itemEl?.querySelectorAll?.('input, textarea, select') || [])
+        .map((fieldEl) => {
+          const marker =
+            fieldEl.name ||
+            fieldEl.id ||
+            fieldEl.getAttribute?.('data-property') ||
+            fieldEl.getAttribute?.('placeholder') ||
+            fieldEl.className ||
+            fieldEl.tagName;
+
+          if (!marker) return '';
+
+          if (fieldEl instanceof HTMLTextAreaElement) {
+            return `${marker}:${fieldEl.value}`;
+          }
+
+          if (fieldEl instanceof HTMLSelectElement) {
+            return `${marker}:${fieldEl.value}`;
+          }
+
+          if (fieldEl instanceof HTMLInputElement) {
+            const type = (fieldEl.type || '').toLowerCase();
+            if (type === 'checkbox' || type === 'radio') {
+              // 启用/禁用状态不参与指纹，避免仅因开关变化就把同一条脚本识别成新条目。
+              return `${marker}:${type}`;
+            }
+            return `${marker}:${fieldEl.value}`;
+          }
+
+          return `${marker}:${fieldEl.value ?? ''}`;
+        })
+        .filter(Boolean)
+        .join(GROUP_KEY_SEP);
+
+      return `fp:${hashString(`${name}${GROUP_KEY_SEP}${fieldFingerprints}`)}`;
+    }
+
+    function buildScriptOrderEntries(items) {
+      const occurrenceMap = new Map();
+
+      return items.map((itemEl, domIndex) => {
+        const baseKey = getScriptIdentityBaseKey(itemEl);
+        const occurrence = (occurrenceMap.get(baseKey) || 0) + 1;
+        occurrenceMap.set(baseKey, occurrence);
+
+        return {
+          el: itemEl,
+          domIndex,
+          orderKey: `${baseKey}#${occurrence}`,
+        };
+      });
+    }
+
+    function mergeItemOrderState(currentKeys, { preferCurrent = false } = {}) {
+      const nextCurrent = Array.from(new Set(currentKeys.filter(Boolean)));
+      if (nextCurrent.length === 0) return [];
+
+      if (preferCurrent || itemOrderState.length === 0) {
+        return nextCurrent;
+      }
+
+      const currentKeySet = new Set(nextCurrent);
+      const next = itemOrderState.filter((key) => currentKeySet.has(key));
+
+      for (let i = 0; i < nextCurrent.length; i++) {
+        const key = nextCurrent[i];
+        if (next.includes(key)) continue;
+
+        let insertAt = -1;
+
+        for (let j = i - 1; j >= 0; j--) {
+          const prevIndex = next.indexOf(nextCurrent[j]);
+          if (prevIndex >= 0) {
+            insertAt = prevIndex + 1;
+            break;
+          }
+        }
+
+        if (insertAt < 0) {
+          for (let j = i + 1; j < nextCurrent.length; j++) {
+            const nextIndex = next.indexOf(nextCurrent[j]);
+            if (nextIndex >= 0) {
+              insertAt = nextIndex;
+              break;
+            }
+          }
+        }
+
+        if (insertAt < 0) next.push(key);
+        else next.splice(insertAt, 0, key);
+      }
+
+      return next;
+    }
+
     function setFlexOrder(el, order) {
       if (!el || !el.style) return;
       if (el.dataset.stRgsPrevOrder === undefined) {
@@ -330,6 +1019,76 @@
       } else {
         el.style.order = '';
       }
+    }
+
+    function syncStoredItemOrder(items, options = {}) {
+      const entries = buildScriptOrderEntries(items);
+      const next = mergeItemOrderState(
+        entries.map((entry) => entry.orderKey),
+        options
+      );
+
+      if (!arrayShallowEqual(itemOrderState, next)) {
+        saveItemOrder(next);
+      }
+
+      return entries;
+    }
+
+    let lastKnownItemOrderKeys = null;
+    let lastKnownGroupKeys = null;
+
+    function buildGroupingSnapshot(entries) {
+      const itemOrderKeys = [];
+      const groupKeys = new Set();
+
+      for (const entry of entries) {
+        const displayName = getScriptDisplayName(entry.el);
+        const { groups } = parseGroupPath(displayName);
+        const group1 = groups[0] || UNGROUPED_GROUP_NAME;
+        const group2 = subgroupEnabled ? (groups[1] || '') : '';
+
+        itemOrderKeys.push(entry.orderKey);
+        groupKeys.add(makeGroupKey(group1));
+        if (group2) groupKeys.add(makeGroupKey(group1, group2));
+      }
+
+      return {
+        itemOrderKeys,
+        groupKeys: Array.from(groupKeys),
+      };
+    }
+
+    function storeGroupingSnapshot(snapshot) {
+      lastKnownItemOrderKeys = Array.isArray(snapshot?.itemOrderKeys) ? snapshot.itemOrderKeys.slice() : [];
+      lastKnownGroupKeys = Array.isArray(snapshot?.groupKeys) ? snapshot.groupKeys.slice() : [];
+    }
+
+    function syncItemOrderAndSnapshot(items, options = {}) {
+      const entries = syncStoredItemOrder(items, options);
+      storeGroupingSnapshot(buildGroupingSnapshot(entries));
+      return entries;
+    }
+
+    function getOrderedScriptEntries(listEl) {
+      const items = getScriptItemEls(listEl);
+      const entries = syncStoredItemOrder(items);
+      if (entries.length === 0) return [];
+
+      const rankMap = new Map(itemOrderState.map((key, index) => [key, index]));
+      const fallbackBaseRank = rankMap.size;
+
+      return entries
+        .slice()
+        .sort((a, b) => {
+          const orderA = rankMap.has(a.orderKey) ? rankMap.get(a.orderKey) : fallbackBaseRank + a.domIndex;
+          const orderB = rankMap.has(b.orderKey) ? rankMap.get(b.orderKey) : fallbackBaseRank + b.domIndex;
+          return orderA - orderB || a.domIndex - b.domIndex;
+        });
+    }
+
+    function getOrderedScriptItemEls(listEl) {
+      return getOrderedScriptEntries(listEl).map((entry) => entry.el);
     }
 
     function createGroupHeader({ level, group1, group2, title, count, order }) {
@@ -357,6 +1116,7 @@
 
       const countEl = document.createElement('span');
       countEl.className = 'st-rgs-group-count';
+      countEl.dataset.stRgsBaseCount = String(count);
       countEl.textContent = `(${count})`;
 
       // 一级组：图钉（置顶）
@@ -381,9 +1141,10 @@
     function updateHeaderBulkButtonsState() {
       const expandBtn = document.getElementById(EXPAND_ALL_BTN_ID);
       const collapseBtn = document.getElementById(COLLAPSE_ALL_BTN_ID);
+      const searchActive = hasActiveSearchQuery();
 
       const listEl = getScriptsListEl();
-      if (!expandBtn || !collapseBtn || !listEl || !listEl.classList.contains(GROUPING_CLASS)) {
+      if (!expandBtn || !collapseBtn || !listEl || !listEl.classList.contains(GROUPING_CLASS) || searchActive) {
         if (expandBtn) expandBtn.disabled = true;
         if (collapseBtn) collapseBtn.disabled = true;
         return;
@@ -403,6 +1164,22 @@
 
     function applyGroupVisibility(listEl) {
       const groupHeaders = getGroupHeaderEls(listEl);
+      const items = getScriptItemEls(listEl);
+      const searchActive = hasActiveSearchQuery();
+      const matchedGroup1CountMap = new Map();
+      const matchedSubgroupCountMap = new Map();
+
+      for (const itemEl of items) {
+        const group1 = itemEl.dataset.stRgsGroup1 || UNGROUPED_GROUP_NAME;
+        const group2 = itemEl.dataset.stRgsGroup2 || '';
+        const matched = !searchActive || itemMatchesSearch(itemEl);
+
+        itemEl.dataset.stRgsSearchMatch = matched ? '1' : '0';
+        if (!matched) continue;
+
+        matchedGroup1CountMap.set(group1, (matchedGroup1CountMap.get(group1) || 0) + 1);
+        if (group2) matchedSubgroupCountMap.set(makeGroupKey(group1, group2), (matchedSubgroupCountMap.get(makeGroupKey(group1, group2)) || 0) + 1);
+      }
 
       const group1Collapsed = new Set();
 
@@ -412,13 +1189,20 @@
 
         const group1 = headerEl.dataset.stRgsGroup1;
         const key = makeGroupKey(group1);
+        const hasMatches = !searchActive || (matchedGroup1CountMap.get(group1) || 0) > 0;
         const collapsed = !!groupCollapseState[key];
+        const effectiveCollapsed = !searchActive && collapsed;
 
-        headerEl.classList.toggle('st-rgs-is-collapsed', collapsed);
-        headerEl.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        headerEl.classList.toggle('st-rgs-is-collapsed', effectiveCollapsed);
+        headerEl.classList.toggle(SEARCH_HIDDEN_CLASS, !hasMatches);
+        headerEl.setAttribute('aria-expanded', effectiveCollapsed ? 'false' : 'true');
+
+        const countEl = headerEl.querySelector('.st-rgs-group-count');
+        const shownCount = searchActive ? (matchedGroup1CountMap.get(group1) || 0) : Number(countEl?.dataset?.stRgsBaseCount || 0);
+        if (countEl) countEl.textContent = `(${shownCount})`;
 
         const arrow = headerEl.querySelector('[data-st-rgs-group-arrow]');
-        if (arrow) arrow.textContent = collapsed ? '▶' : '▼';
+        if (arrow) arrow.textContent = effectiveCollapsed ? '▶' : '▼';
 
         if (collapsed) group1Collapsed.add(group1);
       }
@@ -430,29 +1214,38 @@
         const group1 = headerEl.dataset.stRgsGroup1;
         const group2 = headerEl.dataset.stRgsGroup2;
         const key = makeGroupKey(group1, group2);
+        const hasMatches = !searchActive || (matchedSubgroupCountMap.get(key) || 0) > 0;
+        const parentHasMatches = !searchActive || (matchedGroup1CountMap.get(group1) || 0) > 0;
 
-        const parentCollapsed = group1Collapsed.has(group1);
+        const parentCollapsed = !searchActive && group1Collapsed.has(group1);
         const collapsed = !!groupCollapseState[key];
+        const effectiveCollapsed = !searchActive && collapsed;
 
-        headerEl.classList.toggle('st-rgs-is-collapsed', collapsed);
+        headerEl.classList.toggle('st-rgs-is-collapsed', effectiveCollapsed);
         headerEl.classList.toggle(HIDDEN_CLASS, parentCollapsed);
-        headerEl.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        headerEl.classList.toggle(SEARCH_HIDDEN_CLASS, !hasMatches || !parentHasMatches);
+        headerEl.setAttribute('aria-expanded', effectiveCollapsed ? 'false' : 'true');
+
+        const countEl = headerEl.querySelector('.st-rgs-group-count');
+        const shownCount = searchActive ? (matchedSubgroupCountMap.get(key) || 0) : Number(countEl?.dataset?.stRgsBaseCount || 0);
+        if (countEl) countEl.textContent = `(${shownCount})`;
 
         const arrow = headerEl.querySelector('[data-st-rgs-group-arrow]');
         // 二级分组用不同箭头符号，便于区分
-        if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
+        if (arrow) arrow.textContent = effectiveCollapsed ? '▸' : '▾';
       }
 
       // 最后处理脚本本体
-      const items = getScriptItemEls(listEl);
       for (const itemEl of items) {
         const group1 = itemEl.dataset.stRgsGroup1;
         const group2 = itemEl.dataset.stRgsGroup2;
+        const matched = itemEl.dataset.stRgsSearchMatch === '1';
 
-        const hideByGroup1 = group1Collapsed.has(group1);
-        const hideByGroup2 = !!group2 && !!groupCollapseState[makeGroupKey(group1, group2)];
+        const hideByGroup1 = !searchActive && group1Collapsed.has(group1);
+        const hideByGroup2 = !searchActive && !!group2 && !!groupCollapseState[makeGroupKey(group1, group2)];
 
         itemEl.classList.toggle(HIDDEN_CLASS, hideByGroup1 || hideByGroup2);
+        itemEl.classList.toggle(SEARCH_HIDDEN_CLASS, !matched);
       }
 
       updateHeaderBulkButtonsState();
@@ -488,6 +1281,8 @@
 
     let rebuilding = false;
     let rebuildScheduled = false;
+    let itemOrderSyncScheduled = false;
+    let itemOrderSyncPreferCurrent = false;
 
     function applyGrouping(listEl) {
       if (!listEl) return;
@@ -497,8 +1292,22 @@
         // 清空旧状态后重建
         cleanupGroupingArtifacts(listEl);
 
-        const items = getScriptItemEls(listEl);
-        if (items.length === 0) return;
+        const orderedEntries = getOrderedScriptEntries(listEl);
+        const snapshot = buildGroupingSnapshot(orderedEntries);
+        const previousItemKeySet = Array.isArray(lastKnownItemOrderKeys) ? new Set(lastKnownItemOrderKeys) : null;
+        const previousGroupKeySet = Array.isArray(lastKnownGroupKeys) ? new Set(lastKnownGroupKeys) : null;
+        const newItemKeySet = previousItemKeySet
+          ? new Set(snapshot.itemOrderKeys.filter((key) => !previousItemKeySet.has(key)))
+          : new Set();
+        const newGroupKeySet = previousGroupKeySet
+          ? new Set(snapshot.groupKeys.filter((key) => !previousGroupKeySet.has(key)))
+          : new Set();
+        const attentionGroupKeySet = new Set();
+
+        if (orderedEntries.length === 0) {
+          storeGroupingSnapshot(snapshot);
+          return;
+        }
 
         listEl.classList.add(GROUPING_CLASS);
 
@@ -529,7 +1338,8 @@
           return gData.subMap.get(group2);
         }
 
-        for (const itemEl of items) {
+        for (const entry of orderedEntries) {
+          const itemEl = entry.el;
           const displayName = getScriptDisplayName(itemEl);
           const { groups } = parseGroupPath(displayName);
 
@@ -541,11 +1351,19 @@
 
           const gData = ensureGroupData(group1);
           if (!group2) {
-            gData.direct.push(itemEl);
+            gData.direct.push(entry);
             itemEl.dataset.stRgsDepth = '1';
           } else {
-            ensureSubGroupData(gData, group2).push(itemEl);
+            ensureSubGroupData(gData, group2).push(entry);
             itemEl.dataset.stRgsDepth = '2';
+          }
+
+          if (newItemKeySet.has(entry.orderKey)) {
+            const group1Key = makeGroupKey(group1);
+            const group2Key = group2 ? makeGroupKey(group1, group2) : '';
+
+            if (!!groupCollapseState[group1Key]) attentionGroupKeySet.add(group1Key);
+            else if (group2Key && !!groupCollapseState[group2Key]) attentionGroupKeySet.add(group2Key);
           }
         }
 
@@ -606,12 +1424,19 @@
             count: totalCount,
             order: base,
           });
+          const group1Key = makeGroupKey(group1);
+          if (newGroupKeySet.has(group1Key) || attentionGroupKeySet.has(group1Key)) {
+            flashElement(groupHeader, attentionGroupKeySet.has(group1Key) ? NEW_GROUP_ATTENTION_HIGHLIGHT_CLASS : NEW_GROUP_HIGHLIGHT_CLASS);
+          }
+
           listEl.appendChild(groupHeader);
 
           // 一级组直辖脚本
           for (let i = 0; i < gData.direct.length; i++) {
-            const itemEl = gData.direct[i];
+            const entry = gData.direct[i];
+            const itemEl = entry.el;
             setFlexOrder(itemEl, base + 1 + i);
+            if (newItemKeySet.has(entry.orderKey)) flashElement(itemEl, NEW_ITEM_HIGHLIGHT_CLASS);
           }
 
           // 二级组（可在设置中关闭）
@@ -630,11 +1455,18 @@
                 count: subItems.length,
                 order: subBase,
               });
+              const subgroupKey = makeGroupKey(group1, group2);
+              if (newGroupKeySet.has(subgroupKey) || attentionGroupKeySet.has(subgroupKey)) {
+                flashElement(subHeader, attentionGroupKeySet.has(subgroupKey) ? NEW_GROUP_ATTENTION_HIGHLIGHT_CLASS : NEW_GROUP_HIGHLIGHT_CLASS);
+              }
+
               listEl.appendChild(subHeader);
 
               for (let i = 0; i < subItems.length; i++) {
-                const itemEl = subItems[i];
+                const entry = subItems[i];
+                const itemEl = entry.el;
                 setFlexOrder(itemEl, subBase + 1 + i);
+                if (newItemKeySet.has(entry.orderKey)) flashElement(itemEl, NEW_ITEM_HIGHLIGHT_CLASS);
               }
             }
           }
@@ -646,6 +1478,7 @@
         }
 
         applyGroupVisibility(listEl);
+        storeGroupingSnapshot(snapshot);
       } finally {
         rebuilding = false;
       }
@@ -661,6 +1494,24 @@
         const listEl = getScriptsListEl();
         if (!listEl || !listEl.isConnected) return;
         applyGrouping(listEl);
+      });
+    }
+
+    function scheduleItemOrderSync(options = {}) {
+      if (options.preferCurrent) itemOrderSyncPreferCurrent = true;
+      if (itemOrderSyncScheduled) return;
+      itemOrderSyncScheduled = true;
+
+      schedule(() => {
+        const preferCurrent = itemOrderSyncPreferCurrent;
+        itemOrderSyncScheduled = false;
+        itemOrderSyncPreferCurrent = false;
+        const listEl = getScriptsListEl();
+        if (!listEl || !listEl.isConnected) return;
+        syncItemOrderAndSnapshot(getScriptItemEls(listEl), { preferCurrent });
+        if (!groupingEnabled) {
+          applyPlainSearchVisibility(listEl);
+        }
       });
     }
 
@@ -681,30 +1532,58 @@
       applyGroupVisibility(listEl);
     }
 
+    function updateGroupingToggleButton(buttonEl) {
+      if (!buttonEl) return;
+
+      const enabled = !!groupingEnabled;
+      const labelEl = buttonEl.querySelector('.st-rgs-group-toggle-label');
+      const iconEl = buttonEl.querySelector('.st-rgs-group-toggle-icon');
+
+      buttonEl.dataset.stRgsEnabled = groupingEnabled ? '1' : '0';
+      buttonEl.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      buttonEl.setAttribute('aria-label', enabled ? '已启用分组展示，点击切换为未分组' : '当前为未分组展示，点击启用分组');
+
+      if (labelEl) labelEl.textContent = enabled ? '分组' : UNGROUPED_GROUP_NAME;
+      else buttonEl.textContent = enabled ? '分组' : UNGROUPED_GROUP_NAME;
+
+      if (iconEl) {
+        iconEl.className = enabled
+          ? 'fa-solid fa-circle-check st-rgs-group-toggle-icon'
+          : 'fa-solid fa-layer-group st-rgs-group-toggle-icon';
+      }
+
+      buttonEl.title = enabled
+        ? '已启用按前缀分组展示（一级/二级可选），点击切换为未分组'
+        : '按前缀分组展示（一级/二级可选），并在分组时禁用拖拽排序';
+    }
+
     function toggleGrouping(nextEnabled) {
       groupingEnabled = !!nextEnabled;
       saveBool(STORAGE_KEY_GROUPING, groupingEnabled);
 
       const headerToggle = document.getElementById(GROUP_TOGGLE_ID);
-      if (headerToggle) headerToggle.checked = groupingEnabled;
+      updateGroupingToggleButton(headerToggle);
 
       const listEl = getScriptsListEl();
       if (!listEl) {
-        // 还没渲染出来，等它出现再应用
-        if (groupingEnabled) startScriptsListWaitObserver();
-        else stopScriptsListWaitObserver();
+        // 还没渲染出来，等它出现后自动接管。
+        startScriptsListWaitObserver();
         return;
       }
 
+      ensureScriptsListEventHandlers(listEl);
+      startScriptsListWaitObserver();
+      startScriptsListObserver(listEl);
+
       if (groupingEnabled) {
         applyGrouping(listEl);
-        startScriptsListObserver(listEl);
       } else {
-        stopScriptsListObserver();
-        stopScriptsListWaitObserver();
         cleanupGroupingArtifacts(listEl);
+        syncItemOrderAndSnapshot(getScriptItemEls(listEl), { preferCurrent: true });
+        applyPlainSearchVisibility(listEl);
       }
 
+      applyBlockCollapsedState(getBlockEl());
       updateHeaderBulkButtonsState();
     }
 
@@ -791,6 +1670,7 @@
     }
 
     let scriptsListObserver = null;
+    let observedScriptsListEl = null;
 
     function startScriptsListObserver(listEl) {
       stopScriptsListObserver();
@@ -815,12 +1695,11 @@
         return !!el?.closest?.('.regex_script_name');
       };
 
-      scriptsListObserver = new MutationObserver((mutations) => {
-        if (!groupingEnabled) return;
+      observedScriptsListEl = listEl;
 
-        // 仅在“脚本列表结构变化 / 脚本名变化”时重建。
-        // 另外：忽略我们自己组 header 内部的变化（包括箭头文本），避免无限重建。
+      scriptsListObserver = new MutationObserver((mutations) => {
         let needRebuild = false;
+        let needOrderSync = false;
 
         for (const m of mutations) {
           if (isWithinGroupHeader(m.target)) continue;
@@ -833,26 +1712,35 @@
             for (const n of nodes) {
               if (isGroupHeaderEl(n)) continue;
               if (isScriptItemEl(n)) {
-                needRebuild = true;
+                needRebuild = groupingEnabled;
+                needOrderSync = !groupingEnabled;
                 break;
               }
               // 其它元素（非组 header）的增删也可能影响布局，保险起见也重建
               if (n?.nodeType === 1) {
-                needRebuild = true;
+                needRebuild = groupingEnabled;
+                needOrderSync = !groupingEnabled;
                 break;
               }
             }
           } else if (m.type === 'characterData') {
             // 只关心脚本名的文本变化
             if (!isWithinScriptName(m.target)) continue;
-            needRebuild = true;
+            needRebuild = groupingEnabled;
+            needOrderSync = !groupingEnabled;
           }
 
-          if (needRebuild) break;
+          if (needRebuild || needOrderSync) break;
         }
 
-        if (!needRebuild) return;
-        scheduleGroupingRebuild();
+        if (groupingEnabled) {
+          if (!needRebuild) return;
+          scheduleGroupingRebuild();
+          return;
+        }
+
+        if (!needOrderSync) return;
+        scheduleItemOrderSync({ preferCurrent: true });
       });
 
       scriptsListObserver.observe(listEl, {
@@ -865,6 +1753,7 @@
     function stopScriptsListObserver() {
       if (!scriptsListObserver) return;
       scriptsListObserver.disconnect();
+      observedScriptsListEl = null;
       scriptsListObserver = null;
     }
 
@@ -873,25 +1762,47 @@
     function startScriptsListWaitObserver() {
       if (scriptsListWaitObserver || typeof MutationObserver !== 'function') return;
 
+
       const root = getBlockEl() || document.body || document.documentElement;
       if (!root) return;
 
-      scriptsListWaitObserver = new MutationObserver(() => {
-        if (!groupingEnabled) return;
-        const listEl = getScriptsListEl();
-        if (!listEl) return;
+      let scheduled = false;
 
-        // 找到了就挂载
-        scriptsListWaitObserver.disconnect();
-        scriptsListWaitObserver = null;
+      const syncCurrentList = () => {
+        const listEl = getScriptsListEl();
+        if (!listEl || !listEl.isConnected) {
+          if (observedScriptsListEl && !observedScriptsListEl.isConnected) {
+            stopScriptsListObserver();
+          }
+          return;
+        }
 
         ensureScriptsListEventHandlers(listEl);
-        applyGrouping(listEl);
+
+        if (listEl === observedScriptsListEl) return;
+
         startScriptsListObserver(listEl);
+
+        if (groupingEnabled) applyGrouping(listEl);
+        else {
+          syncItemOrderAndSnapshot(getScriptItemEls(listEl), { preferCurrent: true });
+          applyPlainSearchVisibility(listEl);
+        }
+
         updateHeaderBulkButtonsState();
+      };
+
+      scriptsListWaitObserver = new MutationObserver(() => {
+        if (scheduled) return;
+        scheduled = true;
+        schedule(() => {
+          scheduled = false;
+          syncCurrentList();
+        });
       });
 
       scriptsListWaitObserver.observe(root, { childList: true, subtree: true });
+      syncCurrentList();
     }
 
     function stopScriptsListWaitObserver() {
@@ -903,20 +1814,23 @@
     function ensureGroupingMounted() {
       const listEl = getScriptsListEl();
       if (!listEl) {
-        if (groupingEnabled) startScriptsListWaitObserver();
+        startScriptsListWaitObserver();
         return false;
       }
 
+      startScriptsListWaitObserver();
       ensureScriptsListEventHandlers(listEl);
+      startScriptsListObserver(listEl);
 
       if (groupingEnabled) {
         applyGrouping(listEl);
-        startScriptsListObserver(listEl);
       } else {
-        stopScriptsListObserver();
         cleanupGroupingArtifacts(listEl);
+        syncItemOrderAndSnapshot(getScriptItemEls(listEl), { preferCurrent: true });
+        applyPlainSearchVisibility(listEl);
       }
 
+      applyBlockCollapsedState(getBlockEl());
       updateHeaderBulkButtonsState();
       return true;
     }
@@ -930,17 +1844,24 @@
         return false;
       }
 
+      refreshCollapsePreservedElements(blockEl);
+
       // 每次尝试挂载时刷新设置（避免其他地方修改了 localStorage）
       subgroupEnabled = loadBool(STORAGE_KEY_SUBGROUP, true);
+      collapsedState = loadBool(STORAGE_KEY_COLLAPSED, false);
+      itemOrderState = loadItemOrder();
+
+      if (scope === 'global') ensureSearchBar();
 
       // 已经注入过就不重复注入
       const existingHeader = getHeaderEl();
       if (existingHeader) {
         // 同步一下 header 的展示（箭头/aria），并更新分组 toggle
-        setCollapsed(blockEl, getCollapsed(blockEl));
+        setCollapsed(blockEl, getCollapsed());
+        existingHeader.dataset[COLLAPSE_HEADER_DATA_KEY] = '1';
 
         const toggle = existingHeader.querySelector(`#${GROUP_TOGGLE_ID}`);
-        if (toggle) toggle.checked = !!groupingEnabled;
+        updateGroupingToggleButton(toggle);
 
         const subgroupToggle = existingHeader.querySelector(`#${SUBGROUP_TOGGLE_ID}`);
         if (subgroupToggle) subgroupToggle.checked = !!subgroupEnabled;
@@ -953,19 +1874,19 @@
       const header = document.createElement('div');
       header.id = HEADER_ID;
       header.className = 'st-rgs-header flex-container flexGap10 alignItemsCenter';
+      header.dataset[COLLAPSE_HEADER_DATA_KEY] = '1';
       header.setAttribute('aria-controls', blockId);
 
       header.innerHTML = `
         <div class="st-rgs-click-area flex-container flexGap10 alignItemsCenter flex1" data-st-rgs-collapse-toggle role="button" tabindex="0" title="点击收起/展开">
           <span class="st-rgs-arrow" data-st-rgs-arrow>▼</span>
           <b class="st-rgs-title">${titleText}</b>
-          <span class="st-rgs-hint">（点击收起/展开）</span>
         </div>
         <div class="st-rgs-controls flex-container flexGap10 alignItemsCenter">
-          <label class="checkbox flex-container alignItemsCenter st-rgs-group-toggle" title="按前缀分组展示（一级/二级可选），并在分组时禁用拖拽排序">
-            <input type="checkbox" id="${GROUP_TOGGLE_ID}">
-            <span>分组</span>
-          </label>
+          <button type="button" class="menu_button interactable st-rgs-icon-btn st-rgs-group-toggle" id="${GROUP_TOGGLE_ID}" title="按前缀分组展示（一级/二级可选），并在分组时禁用拖拽排序" aria-label="切换分组展示" aria-pressed="false">
+            <span class="fa-solid fa-layer-group st-rgs-group-toggle-icon" aria-hidden="true"></span>
+            <span class="st-rgs-group-toggle-label">${UNGROUPED_GROUP_NAME}</span>
+          </button>
 
           <button type="button" class="menu_button interactable st-rgs-icon-btn" id="${EXPAND_ALL_BTN_ID}" title="全部展开" aria-label="全部展开" disabled>
             <span class="fa-solid fa-angles-down"></span>
@@ -1001,7 +1922,7 @@
           e.preventDefault();
           e.stopPropagation();
         }
-        const next = !getCollapsed(blockEl);
+        const next = !getCollapsed();
         setCollapsed(blockEl, next);
       };
 
@@ -1015,13 +1936,13 @@
       // 分组 toggle
       const groupToggle = header.querySelector(`#${GROUP_TOGGLE_ID}`);
       if (groupToggle) {
-        groupToggle.checked = !!groupingEnabled;
+        updateGroupingToggleButton(groupToggle);
 
         // 不要冒泡到 toggleArea，避免误触发整体收起
-        groupToggle.addEventListener('click', (e) => e.stopPropagation());
-        groupToggle.addEventListener('change', (e) => {
+        groupToggle.addEventListener('click', (e) => {
+          e.preventDefault();
           e.stopPropagation();
-          toggleGrouping(!!groupToggle.checked);
+          toggleGrouping(!groupingEnabled);
         });
       }
 
@@ -1120,7 +2041,7 @@
       // 初始化：优先从 localStorage 恢复用户上一次的折叠状态
       setCollapsed(blockEl, loadBool(STORAGE_KEY_COLLAPSED, false));
 
-      // 初始化：根据 localStorage 恢复分组展示开关
+      // 初始化：根据 localStorage 恢复分组展示开关，并同步按钮文案
       ensureGroupingMounted();
       updateHeaderBulkButtonsState();
 
@@ -1206,13 +2127,25 @@
         listId: 'saved_preset_scripts',
         titleText: '预设正则',
       }),
+
+      // 局部正则（角色局部脚本，收纳时保留局部启用开关）
+      createPanelController({
+        scope: 'scoped',
+        blockId: 'scoped_scripts_block',
+        listId: 'saved_scoped_scripts',
+        titleText: '局部正则',
+        preserveSelectors: ['#toggle_scoped_regex'],
+      }),
     ];
 
     const tryEnsureAll = () => {
+      ensureRegexHideControls();
       for (const c of controllers) {
         c.tryEnsure();
       }
     };
+
+    startRegexHideObserver();
 
     // 规范：等 APP_READY 再动 DOM
     eventSource?.on?.(event_types.APP_READY, tryEnsureAll);

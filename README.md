@@ -1,10 +1,11 @@
 # Regex Global Scripts Collapser
 
-一个**独立的 SillyTavern 前端插件**，用于管理酒馆正则（Regex）界面里的全局正则脚本和预设区域：
+一个**独立的 SillyTavern 前端插件**，用于管理酒馆正则（Regex）界面：
 
-1. **全局正则 Global Scripts 整块可点击收起/展开**
-2. **全局正则脚本列表支持按组分类展示与折叠**
-3. **对“预设正则（Preset Scripts）”同样生效**（折叠 + 分组）
+1. **正则整块可点击收起/展开**
+2. **正则列表支持按组分类展示与折叠**
+3. **原生 Regex 操作栏新增“隐藏设置”按钮**，可按需隐藏新建 / 导入 / 批量编辑 / 调试工具按钮 等酒馆按钮
+4. **支持隐藏“正则预设”区域**
 
 > 说明：分组展示仅影响“显示方式”，不改变 SillyTavern 内部的正则执行顺序。
 
@@ -20,11 +21,9 @@ https://github.com/qianzhuowo/RegexGlobalScriptsCollapser
 
 <video src="https://github.com/user-attachments/assets/6e2060c3-8eb1-4d54-b452-dbf72cbdf7e3.mp4" controls="controls" width="80%" loop></video>
 
-### 1) 全局正则折叠
+### 1) 正则折叠
 
-### 2) 预设正则折叠
-
-### 3) 分组展示
+### 2) 分组展示
 
 - 支持根据脚本名**前缀**分组：
   - 一级分组：默认开启
@@ -41,6 +40,8 @@ https://github.com/qianzhuowo/RegexGlobalScriptsCollapser
   - 一键展开收纳：
     - 「全部展开 / 全部收纳」按钮
     - 「使用说明」按钮
+
+### 3) 隐藏设置
 
 
 ## 手动安装

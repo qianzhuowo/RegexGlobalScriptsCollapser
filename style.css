@@ -3,7 +3,8 @@
 
   目标：
   1) 把 #global_scripts_block 收纳（折叠/展开）
-  2) 为全局正则脚本列表 #saved_regex_scripts 增加“按组分类展示（可折叠）”功能
+  2) 把 #preset_scripts_block / #scoped_scripts_block 也纳入相同收纳逻辑
+  3) 为全局 / 预设 / 局部正则脚本列表增加“按组分类展示（可折叠）”功能
 
   说明：
   - 分组展示仅影响显示，不改变 SillyTavern 内部的正则执行顺序。
@@ -11,7 +12,7 @@
 */
 
 /* header 样式：尽量贴合 ST 的风格
-   (Global / Preset 两个面板共用)
+   (Global / Preset / Scoped 三个面板共用)
 */
 .st-rgs-header {
   user-select: none;
@@ -79,50 +80,192 @@
   padding: 0 6px;
 }
 
+.st-rgs-force-hidden {
+  display: none !important;
+}
+
+/* =====================
+   Regex Page Hide Settings
+   ===================== */
+
+.st-rgs-native-hide-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.st-rgs-native-hide-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 10000;
+  min-width: 240px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: min(70vh, calc(100vh - 16px));
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--mainColor, rgba(255, 255, 255, 0.2));
+  border-radius: 8px;
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.8));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  overscroll-behavior: contain;
+}
+
+.st-rgs-native-hide-menu.st-rgs-hidden {
+  display: none !important;
+}
+
+.st-rgs-native-hide-title {
+  margin-bottom: 8px;
+  font-size: 0.95em;
+  font-weight: 600;
+  opacity: 0.95;
+}
+
+.st-rgs-native-hide-toggle {
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+.st-rgs-native-hide-toggle span {
+  white-space: normal;
+  line-height: 1.4;
+  opacity: 0.92;
+}
+
+.st-rgs-native-hide-toggle input {
+  pointer-events: none;
+}
+
+.st-rgs-native-hide-toggle:focus-visible {
+  outline: 1px solid var(--mainColor, rgba(255, 255, 255, 0.45));
+  outline-offset: 2px;
+}
+
 .st-rgs-header .st-rgs-arrow {
   width: 16px;
   display: inline-block;
 }
 
-.st-rgs-header .st-rgs-hint {
-  opacity: 0.65;
-  font-size: 0.9em;
-}
-
 .st-rgs-header .st-rgs-group-toggle {
   opacity: 0.9;
-  gap: 4px;
-}
-
-.st-rgs-header .st-rgs-group-toggle span {
-  opacity: 0.85;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 96px;
+  padding: 0 12px;
+  white-space: nowrap;
   font-size: 0.95em;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
 }
 
-/* 折叠逻辑：隐藏 block 中除了 header 外的所有直接子元素
-   - global: #st-rgs-collapse-header-global
-   - preset: #st-rgs-collapse-header-preset
+.st-rgs-header .st-rgs-group-toggle .st-rgs-group-toggle-icon {
+  font-size: 0.98em;
+  opacity: 0.92;
+  transition:
+    color 0.18s ease,
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    filter 0.18s ease;
+}
+
+.st-rgs-header .st-rgs-group-toggle .st-rgs-group-toggle-label {
+  line-height: 1;
+}
+
+.st-rgs-header .st-rgs-group-toggle[data-st-rgs-enabled="1"] {
+  color: #eafcff;
+  border-color: rgba(106, 224, 186, 0.72);
+  background: linear-gradient(135deg, rgba(85, 194, 255, 0.28), rgba(101, 227, 168, 0.3));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 0 0 1px rgba(115, 214, 255, 0.16),
+    0 0 14px rgba(91, 220, 180, 0.24);
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(140, 240, 255, 0.18);
+}
+
+.st-rgs-header .st-rgs-group-toggle[data-st-rgs-enabled="1"]:hover {
+  filter: brightness(1.12);
+  transform: translateY(-1px);
+}
+
+.st-rgs-header .st-rgs-group-toggle[data-st-rgs-enabled="1"] .st-rgs-group-toggle-icon {
+  color: #d7fff1;
+  opacity: 1;
+  transform: scale(1.05);
+  filter: drop-shadow(0 0 6px rgba(125, 239, 206, 0.24));
+}
+
+/* =====================
+   Shared Search Bar
+   ===================== */
+
+.st-rgs-search-bar {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--mainColor, rgba(255, 255, 255, 0.2));
+  border-radius: 8px;
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.25));
+}
+
+.st-rgs-search-bar .st-rgs-search-icon {
+  opacity: 0.7;
+}
+
+.st-rgs-search-bar .st-rgs-search-input {
+  min-width: 0;
+}
+
+.st-rgs-search-bar .st-rgs-search-clear {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+}
+
+.st-rgs-search-bar .st-rgs-search-clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.st-rgs-search-hidden {
+  display: none !important;
+}
+
+/* 折叠逻辑：隐藏 block 中除了插件 header 与“需保留元素”之外的所有直接子元素
+   - data-st-rgs-header="1": 本插件注入的 header
+   - data-st-rgs-preserve-on-collapse="1": 某些面板收纳时仍需显示的原生元素（如局部正则开关）
 */
-#global_scripts_block.st-rgs-collapsed> :not(#st-rgs-collapse-header-global),
-#preset_scripts_block.st-rgs-collapsed> :not(#st-rgs-collapse-header-preset) {
+.st-rgs-collapsed > :not([data-st-rgs-header="1"]):not([data-st-rgs-preserve-on-collapse="1"]) {
   display: none !important;
 }
 
 /* =====================
-   分组展示：#saved_regex_scripts & #saved_preset_scripts
+   分组展示：#saved_regex_scripts / #saved_preset_scripts / #saved_scoped_scripts
    ===================== */
 
 #saved_regex_scripts.st-rgs-grouping,
-#saved_preset_scripts.st-rgs-grouping {
+#saved_preset_scripts.st-rgs-grouping,
+#saved_scoped_scripts.st-rgs-grouping {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-group-header,
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-group-header,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-group-header,
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-subgroup-header,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-group-header,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-subgroup-header,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-group-header,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-subgroup-header {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -134,15 +277,18 @@
   background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.15));
 }
 
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-group-header:hover,
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header:hover,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-group-header:hover,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header:hover {
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-group-header:hover,
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-subgroup-header:hover,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-group-header:hover,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-subgroup-header:hover,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-group-header:hover,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-subgroup-header:hover {
   filter: brightness(1.05);
 }
 
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header {
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-subgroup-header,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-subgroup-header,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-subgroup-header {
   margin-left: 12px;
   opacity: 0.95;
 
@@ -152,56 +298,65 @@
 }
 
 #saved_regex_scripts.st-rgs-grouping .st-rgs-group-arrow,
-#saved_preset_scripts.st-rgs-grouping .st-rgs-group-arrow {
+#saved_preset_scripts.st-rgs-grouping .st-rgs-group-arrow,
+#saved_scoped_scripts.st-rgs-grouping .st-rgs-group-arrow {
   width: 16px;
   display: inline-block;
 }
 
 /* 二级分组箭头淡一点 */
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-subgroup-header .st-rgs-group-arrow,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-subgroup-header .st-rgs-group-arrow {
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-subgroup-header .st-rgs-group-arrow,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-subgroup-header .st-rgs-group-arrow,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-subgroup-header .st-rgs-group-arrow {
   opacity: 0.85;
 }
 
 #saved_regex_scripts.st-rgs-grouping .st-rgs-group-count,
-#saved_preset_scripts.st-rgs-grouping .st-rgs-group-count {
+#saved_preset_scripts.st-rgs-grouping .st-rgs-group-count,
+#saved_scoped_scripts.st-rgs-grouping .st-rgs-group-count {
   opacity: 0.7;
   margin-left: 4px;
 }
 
 /* 一级组图钉 */
 #saved_regex_scripts.st-rgs-grouping .st-rgs-pin,
-#saved_preset_scripts.st-rgs-grouping .st-rgs-pin {
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin,
+#saved_scoped_scripts.st-rgs-grouping .st-rgs-pin {
   margin-left: auto;
   opacity: 0.6;
   cursor: pointer;
 }
 
 #saved_regex_scripts.st-rgs-grouping .st-rgs-pin:hover,
-#saved_preset_scripts.st-rgs-grouping .st-rgs-pin:hover {
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin:hover,
+#saved_scoped_scripts.st-rgs-grouping .st-rgs-pin:hover {
   opacity: 0.95;
 }
 
 #saved_regex_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"],
-#saved_preset_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"] {
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"],
+#saved_scoped_scripts.st-rgs-grouping .st-rgs-pin[data-st-rgs-pinned="1"] {
   opacity: 1;
   color: var(--mainColor, #ffd54a);
   filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.75));
 }
 
 #saved_regex_scripts.st-rgs-grouping .st-rgs-pin i,
-#saved_preset_scripts.st-rgs-grouping .st-rgs-pin i {
+#saved_preset_scripts.st-rgs-grouping .st-rgs-pin i,
+#saved_scoped_scripts.st-rgs-grouping .st-rgs-pin i {
   transform: rotate(-30deg);
 }
 
 /* 缩进：脚本条目在组 header 之下 */
-#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="1"],
-#saved_preset_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="1"] {
+#saved_regex_scripts.st-rgs-grouping > .regex-script-label[data-st-rgs-depth="1"],
+#saved_preset_scripts.st-rgs-grouping > .regex-script-label[data-st-rgs-depth="1"],
+#saved_scoped_scripts.st-rgs-grouping > .regex-script-label[data-st-rgs-depth="1"] {
   margin-left: 12px;
 }
 
-#saved_regex_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="2"],
-#saved_preset_scripts.st-rgs-grouping>.regex-script-label[data-st-rgs-depth="2"] {
+#saved_regex_scripts.st-rgs-grouping > .regex-script-label[data-st-rgs-depth="2"],
+#saved_preset_scripts.st-rgs-grouping > .regex-script-label[data-st-rgs-depth="2"],
+#saved_scoped_scripts.st-rgs-grouping > .regex-script-label[data-st-rgs-depth="2"] {
   margin-left: 24px;
 }
 
@@ -209,16 +364,98 @@
 #saved_regex_scripts.st-rgs-grouping .drag-handle,
 #saved_regex_scripts.st-rgs-grouping .menu-handle,
 #saved_preset_scripts.st-rgs-grouping .drag-handle,
-#saved_preset_scripts.st-rgs-grouping .menu-handle {
+#saved_preset_scripts.st-rgs-grouping .menu-handle,
+#saved_scoped_scripts.st-rgs-grouping .drag-handle,
+#saved_scoped_scripts.st-rgs-grouping .menu-handle {
   pointer-events: none !important;
   opacity: 0.35;
   cursor: not-allowed;
 }
 
 /* 隐藏（用于折叠组） */
-#saved_regex_scripts.st-rgs-grouping>.st-rgs-hidden,
-#saved_preset_scripts.st-rgs-grouping>.st-rgs-hidden {
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-hidden,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-hidden,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-hidden {
   display: none !important;
+}
+
+@keyframes st-rgs-new-entry-flash {
+  0% {
+    box-shadow:
+      0 0 0 0 rgba(255, 213, 74, 0.95),
+      inset 0 0 0 999px rgba(255, 213, 74, 0.28);
+    filter: brightness(1.06);
+  }
+
+  65% {
+    box-shadow:
+      0 0 0 6px rgba(255, 213, 74, 0),
+      inset 0 0 0 999px rgba(255, 213, 74, 0.08);
+    filter: brightness(1.02);
+  }
+
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(255, 213, 74, 0),
+      inset 0 0 0 999px rgba(255, 213, 74, 0);
+    filter: none;
+  }
+}
+
+@keyframes st-rgs-new-entry-attention-flash {
+  0% {
+    box-shadow:
+      0 0 0 0 rgba(255, 170, 60, 1),
+      0 0 18px 2px rgba(255, 170, 60, 0.55),
+      inset 0 0 0 999px rgba(255, 170, 60, 0.36);
+    filter: brightness(1.1) saturate(1.08);
+    transform: scale(1);
+  }
+
+  45% {
+    box-shadow:
+      0 0 0 5px rgba(255, 170, 60, 0.18),
+      0 0 20px 4px rgba(255, 170, 60, 0.4),
+      inset 0 0 0 999px rgba(255, 170, 60, 0.15);
+    transform: scale(1.01);
+  }
+
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(255, 170, 60, 0),
+      0 0 0 0 rgba(255, 170, 60, 0),
+      inset 0 0 0 999px rgba(255, 170, 60, 0);
+    filter: none;
+    transform: scale(1);
+  }
+}
+
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-group-header.st-rgs-new-group,
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-subgroup-header.st-rgs-new-group,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-group-header.st-rgs-new-group,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-subgroup-header.st-rgs-new-group,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-group-header.st-rgs-new-group,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-subgroup-header.st-rgs-new-group,
+#saved_regex_scripts.st-rgs-grouping > .regex-script-label.st-rgs-new-item,
+#saved_preset_scripts.st-rgs-grouping > .regex-script-label.st-rgs-new-item,
+#saved_scoped_scripts.st-rgs-grouping > .regex-script-label.st-rgs-new-item {
+  animation: st-rgs-new-entry-flash 1.4s ease-out 1;
+}
+
+#saved_regex_scripts.st-rgs-grouping > .regex-script-label.st-rgs-new-item,
+#saved_preset_scripts.st-rgs-grouping > .regex-script-label.st-rgs-new-item,
+#saved_scoped_scripts.st-rgs-grouping > .regex-script-label.st-rgs-new-item {
+  border-radius: 6px;
+}
+
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-group-header.st-rgs-new-group-attention,
+#saved_regex_scripts.st-rgs-grouping > .st-rgs-subgroup-header.st-rgs-new-group-attention,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-group-header.st-rgs-new-group-attention,
+#saved_preset_scripts.st-rgs-grouping > .st-rgs-subgroup-header.st-rgs-new-group-attention,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-group-header.st-rgs-new-group-attention,
+#saved_scoped_scripts.st-rgs-grouping > .st-rgs-subgroup-header.st-rgs-new-group-attention {
+  animation: st-rgs-new-entry-attention-flash 1.55s cubic-bezier(0.2, 0.8, 0.2, 1) 1;
+  transform-origin: center;
 }
 
 /* =====================
