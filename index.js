@@ -25,15 +25,18 @@
 
   // 使用说明弹窗（全局复用一个）
   const HELP_MODAL_ID = 'st-rgs-help-modal';
+  const QUICK_GROUPING_MODAL_ID = 'st-rgs-quick-grouping-modal';
   const SEARCH_HIDDEN_CLASS = 'st-rgs-search-hidden';
   const SEARCH_BAR_ID = 'st-rgs-search-bar';
   const SEARCH_INPUT_ID = 'st-rgs-search-input';
   const SEARCH_CLEAR_ID = 'st-rgs-search-clear';
   const REGEX_PAGE_HIDE_WRAPPER_ID = 'st-rgs-regex-hide-settings-anchor';
   const REGEX_PAGE_HIDE_BUTTON_ID = 'st-rgs-regex-hide-settings-trigger';
+  const REGEX_PAGE_QUICK_GROUPING_BUTTON_ID = 'st-rgs-regex-quick-grouping-trigger';
   const REGEX_PAGE_HIDE_MENU_ID = 'st-rgs-regex-hide-settings-menu';
   const REGEX_PAGE_FORCE_HIDDEN_CLASS = 'st-rgs-force-hidden';
   const REGEX_PAGE_HIDE_STORAGE_KEY = `${MODULE_NAME}:regexPageHiddenTargets`;
+  const QUICK_GROUPING_SCOPE_ORDER = ['global', 'preset', 'scoped'];
   const REGEX_PAGE_HIDE_TARGETS = [
     {
       key: 'open_regex_editor',
@@ -58,8 +61,19 @@
 
   let sharedSearchQuery = '';
   const sharedSearchListeners = new Set();
+  let quickGroupingActiveScope = 'global';
+  let quickGroupingRenderToken = 0;
+  const quickGroupingDraftState = {
+    filter: '',
+    group1: '',
+    group2: '',
+    format1: 'bracket',
+    format2: 'bracket',
+  };
+  const quickGroupingSelections = { global: [], preset: [], scoped: [] };
   let regexPageHideObserver = null;
   let regexPageHideDocHandlersBound = false;
+  const GROUP_STATE_DEBUG_ENABLED = true;
 
   function log(...args) {
     console.log(`[${MODULE_NAME}]`, ...args);
@@ -67,6 +81,42 @@
 
   function warn(...args) {
     console.warn(`[${MODULE_NAME}]`, ...args);
+  }
+
+  function debug(...args) {
+    if (!GROUP_STATE_DEBUG_ENABLED) return;
+    console.log(`[${MODULE_NAME}][debug]`, ...args);
+  }
+
+  function summarizeRegexScriptState(script) {
+    return {
+      id: String(script?.id ?? ''),
+      name: String(script?.scriptName ?? ''),
+      disabled: !!script?.disabled,
+    };
+  }
+
+  function summarizeRegexScriptStates(scripts) {
+    return (Array.isArray(scripts) ? scripts : []).map((script) => summarizeRegexScriptState(script));
+  }
+
+  function debugGroupState(label, payload) {
+    if (!GROUP_STATE_DEBUG_ENABLED) return;
+
+    const title = `[${MODULE_NAME}][group-debug] ${label}`;
+    try {
+      if (console.groupCollapsed) {
+        console.groupCollapsed(title);
+        console.log(payload);
+        console.trace?.('trace');
+        console.groupEnd();
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    console.log(title, payload);
   }
 
   function schedule(fn) {
@@ -185,6 +235,351 @@
       // ignore
     }
     log(message);
+  }
+
+  function toastSuccess(message) {
+    try {
+      if (window.toastr?.success) {
+        window.toastr.success(message);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    log(message);
+  }
+
+  function toastError(message) {
+    try {
+      if (window.toastr?.error) {
+        window.toastr.error(message);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    warn(message);
+  }
+
+  function uniqStrings(values) {
+    const out = [];
+    const seen = new Set();
+    for (const value of Array.isArray(values) ? values : []) {
+      const key = String(value ?? '');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+    return out;
+  }
+
+  let regexEnginePromise = null;
+
+  async function importRegexEngine() {
+    if (!regexEnginePromise) {
+      regexEnginePromise = eval('import("/scripts/extensions/regex/engine.js")').catch((err) => {
+        warn('Regex engine import failed', err);
+        return null;
+      });
+    }
+
+    return regexEnginePromise;
+  }
+
+  function getCtxEventTypes(ctx = getCtx()) {
+    return ctx?.eventTypes || ctx?.event_types || {};
+  }
+
+  function getRegexScopeType(scope, SCRIPT_TYPES) {
+    switch (scope) {
+      case 'global': return SCRIPT_TYPES.GLOBAL;
+      case 'preset': return SCRIPT_TYPES.PRESET;
+      case 'scoped': return SCRIPT_TYPES.SCOPED;
+      default: return SCRIPT_TYPES.GLOBAL;
+    }
+  }
+
+  function normalizeGroupRenameInput(input) {
+    const value = String(input ?? '').trim();
+    if (!value) throw new Error('分组名称不能为空');
+    if (value === UNGROUPED_GROUP_NAME) throw new Error(`不能使用“${UNGROUPED_GROUP_NAME}”作为分组名`);
+    if (value.includes(GROUP_KEY_SEP)) throw new Error('分组名称包含非法字符');
+    if (/[【】-]/.test(value)) throw new Error('分组名称不能包含 “【】” 或 “-”');
+    return value;
+  }
+
+  function parseGroupNameSegments(name) {
+    let rest = String(name ?? '').trim();
+    const segments = [];
+
+    for (let depth = 0; depth < 2; depth++) {
+      if (!rest) break;
+
+      if (rest.startsWith('【')) {
+        const end = rest.indexOf('】');
+        if (end > 1) {
+          segments.push({ type: 'bracket', value: rest.slice(1, end).trim() });
+          rest = rest.slice(end + 1).trimStart();
+          continue;
+        }
+      }
+
+      const hyphenIndex = rest.indexOf('-');
+      if (hyphenIndex > 0) {
+        segments.push({ type: 'hyphen', value: rest.slice(0, hyphenIndex).trim() });
+        rest = rest.slice(hyphenIndex + 1).trimStart();
+        continue;
+      }
+
+      break;
+    }
+
+    return { segments, rest };
+  }
+
+  function buildGroupedScriptName(segments, rest) {
+    const prefix = (Array.isArray(segments) ? segments : [])
+      .filter((segment) => segment && segment.value)
+      .map((segment) => (segment.type === 'bracket' ? `【${segment.value}】` : `${segment.value}-`))
+      .join('');
+    return `${prefix}${String(rest ?? '')}`.trim();
+  }
+
+  function getScriptGroupKeysFromName(name, { subgroupEnabled = true } = {}) {
+    const { segments } = parseGroupNameSegments(name);
+    const groupValues = (Array.isArray(segments) ? segments : [])
+      .map((segment) => String(segment?.value || '').trim())
+      .filter(Boolean);
+    const group1 = groupValues[0] || UNGROUPED_GROUP_NAME;
+    const group2 = subgroupEnabled ? (groupValues[1] || '') : '';
+    const keys = [makeGroupKey(group1)];
+    if (group2) keys.push(makeGroupKey(group1, group2));
+    return { group1, group2, keys };
+  }
+
+  function resolveItemGroupContext(itemEl, { subgroupEnabled = true } = {}) {
+    const group1FromDataset = String(itemEl?.dataset?.stRgsGroup1 || '');
+    const group2FromDataset = String(itemEl?.dataset?.stRgsGroup2 || '');
+    if (group1FromDataset) {
+      const keys = [makeGroupKey(group1FromDataset)];
+      if (subgroupEnabled && group2FromDataset) keys.push(makeGroupKey(group1FromDataset, group2FromDataset));
+      return { group1: group1FromDataset, group2: subgroupEnabled ? group2FromDataset : '', keys };
+    }
+
+    const rawName = String(itemEl?.dataset?.stRgsRawScriptName || '');
+    return getScriptGroupKeysFromName(rawName, { subgroupEnabled });
+  }
+
+  function findPreferredGroupSnapshotState(snapshotState, groupKeys, scriptId) {
+    const targetId = String(scriptId || '');
+    if (!targetId) return undefined;
+
+    const orderedKeys = sortGroupKeysBySpecificity(groupKeys);
+    for (const key of orderedKeys) {
+      const snapshot = snapshotState?.[key];
+      if (!snapshot || typeof snapshot !== 'object') continue;
+      if (Object.prototype.hasOwnProperty.call(snapshot, targetId)) {
+        return !!snapshot[targetId];
+      }
+    }
+
+    return undefined;
+  }
+
+  function getActiveDisabledGroupKeys(groupState, groupKeys) {
+    return (Array.isArray(groupKeys) ? groupKeys : []).filter((key) => !!groupState?.[key]);
+  }
+
+  function isForcedDisabledByAnyGroup(groupState, groupKeys) {
+    return getActiveDisabledGroupKeys(groupState, groupKeys).length > 0;
+  }
+
+  function isForcedDisabledByOtherGroups(groupState, groupKeys, excludingKey) {
+    return getActiveDisabledGroupKeys(groupState, groupKeys).some((key) => key !== excludingKey);
+  }
+
+  function sortGroupKeysBySpecificity(groupKeys) {
+    return (Array.isArray(groupKeys) ? groupKeys.slice() : []).sort((a, b) => {
+      const aDepth = String(a).split(GROUP_KEY_SEP).length;
+      const bDepth = String(b).split(GROUP_KEY_SEP).length;
+      return bDepth - aDepth;
+    });
+  }
+
+  function renameGroupedScriptName(name, { level, group1, group2, newName }) {
+    const parsed = parseGroupNameSegments(name);
+    if (level === 1) {
+      if (parsed.segments[0]?.value !== group1) return null;
+      parsed.segments[0] = { ...parsed.segments[0], value: newName };
+      return buildGroupedScriptName(parsed.segments, parsed.rest);
+    }
+
+    if (level === 2) {
+      if (parsed.segments[0]?.value !== group1 || parsed.segments[1]?.value !== group2) return null;
+      parsed.segments[1] = { ...parsed.segments[1], value: newName };
+      return buildGroupedScriptName(parsed.segments, parsed.rest);
+    }
+
+    return null;
+  }
+
+  async function triggerRegexUiRefresh() {
+    const ctx = getCtx();
+    const eventTypes = getCtxEventTypes(ctx);
+    ctx?.saveSettingsDebounced?.();
+    ctx?.eventSource?.emit?.(eventTypes.PRESET_CHANGED);
+    ctx?.eventSource?.emit?.(eventTypes.SETTINGS_LOADED);
+    ctx?.reloadCurrentChat?.();
+  }
+
+  let popupModulePromise = null;
+
+  async function importPopupModule() {
+    if (!popupModulePromise) {
+      popupModulePromise = eval('import("/scripts/popup.js")').catch((err) => {
+        warn('Popup module import failed', err);
+        return null;
+      });
+    }
+
+    return popupModulePromise;
+  }
+
+  let scriptRuntimePromise = null;
+
+  async function importScriptRuntime() {
+    if (!scriptRuntimePromise) {
+      scriptRuntimePromise = eval('import("/script.js")').catch((err) => {
+        warn('script runtime import failed', err);
+        return null;
+      });
+    }
+
+    return scriptRuntimePromise;
+  }
+
+  let groupChatsModulePromise = null;
+
+  async function importGroupChatsModule() {
+    if (!groupChatsModulePromise) {
+      groupChatsModulePromise = eval('import("/scripts/group-chats.js")').catch((err) => {
+        warn('group-chats module import failed', err);
+        return null;
+      });
+    }
+
+    return groupChatsModulePromise;
+  }
+
+  async function confirmWithNativePopup(message) {
+    const popupModule = await importPopupModule();
+    if (popupModule?.callGenericPopup && popupModule?.POPUP_TYPE?.CONFIRM) {
+      try {
+        return !!(await popupModule.callGenericPopup(message, popupModule.POPUP_TYPE.CONFIRM));
+      } catch (err) {
+        warn('native confirm popup failed, fallback to window.confirm', err);
+      }
+    }
+
+    try {
+      return !!window.confirm(String(message ?? ''));
+    } catch {
+      return false;
+    }
+  }
+
+  async function showNativeInputPopup(message, defaultValue = '') {
+    const popupModule = await importPopupModule();
+    if (popupModule?.Popup?.show?.input) {
+      try {
+        return await popupModule.Popup.show.input(String(message ?? ''), String(defaultValue ?? ''));
+      } catch (err) {
+        warn('native input popup failed, fallback to window.prompt', err);
+      }
+    }
+
+    try {
+      return window.prompt(String(message ?? ''), String(defaultValue ?? ''));
+    } catch {
+      return null;
+    }
+  }
+
+  function sanitizeFileName(name) {
+    return String(name ?? '')
+      .replace(/[\s.<>:"/\\|?*\x00-\x1F\x7F]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase();
+  }
+
+  function downloadJsonFile(data, fileName) {
+    const blob = new Blob([typeof data === 'string' ? data : JSON.stringify(data, null, 4)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function ensureScopedMoveAllowed() {
+    const scriptRuntime = await importScriptRuntime();
+    const groupChatsModule = await importGroupChatsModule();
+
+    if (!scriptRuntime) {
+      throw new Error('无法获取酒馆运行时');
+    }
+
+    if (scriptRuntime.this_chid === undefined) {
+      throw new Error('No character selected.');
+    }
+
+    if (groupChatsModule?.selected_group) {
+      throw new Error('Cannot edit scoped scripts in group chats.');
+    }
+
+    return {
+      scriptRuntime,
+      character: scriptRuntime.characters?.[scriptRuntime.this_chid],
+    };
+  }
+
+  async function ensurePresetMoveAllowed(engine) {
+    const apiId = engine?.getCurrentPresetAPI?.();
+    const presetName = engine?.getCurrentPresetName?.();
+    if (!apiId || !presetName) {
+      throw new Error('当前没有可用的预设目标');
+    }
+    return { apiId, presetName };
+  }
+
+  async function persistScriptsForScope(engine, scope, scripts) {
+    const scriptType = getRegexScopeType(scope, engine.SCRIPT_TYPES);
+    await engine.saveScriptsByType(scripts, scriptType);
+
+    if (scope === 'scoped') {
+      const { character } = await ensureScopedMoveAllowed();
+      engine.allowScopedScripts?.(character);
+      return;
+    }
+
+    if (scope === 'preset') {
+      const { apiId, presetName } = await ensurePresetMoveAllowed(engine);
+      engine.allowPresetScripts?.(apiId, presetName);
+    }
+  }
+
+  function getScopeLabel(scope) {
+    switch (scope) {
+      case 'global': return '全局';
+      case 'preset': return '预设';
+      case 'scoped': return '局部';
+      default: return String(scope || '未知');
+    }
   }
 
   function normalizeSearchText(input) {
@@ -469,6 +864,10 @@
           <i class="fa-solid fa-eye-slash"></i>
           <small>隐藏设置</small>
         </div>
+        <div id="${REGEX_PAGE_QUICK_GROUPING_BUTTON_ID}" class="menu_button menu_button_icon interactable" title="快捷分组" tabindex="0" role="button">
+          <i class="fa-solid fa-layer-group"></i>
+          <small>快捷分组</small>
+        </div>
       `;
 
       toolbarEl.appendChild(wrapperEl);
@@ -494,6 +893,7 @@
       }
 
       const triggerEl = wrapperEl.querySelector(`#${REGEX_PAGE_HIDE_BUTTON_ID}`);
+      const quickGroupingBtn = wrapperEl.querySelector(`#${REGEX_PAGE_QUICK_GROUPING_BUTTON_ID}`);
       menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID);
 
       const toggleMenu = () => {
@@ -512,6 +912,21 @@
         e.preventDefault();
         e.stopPropagation();
         toggleMenu();
+      });
+
+      quickGroupingBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRegexHideMenu();
+        openQuickGroupingModal();
+      });
+
+      quickGroupingBtn?.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeRegexHideMenu();
+        openQuickGroupingModal();
       });
 
       const stopMenuEvent = (e) => e.stopPropagation();
@@ -694,6 +1109,609 @@
     modal.classList.add('st-rgs-hidden');
   }
 
+  function normalizeQuickGroupingScope(scope) {
+    return QUICK_GROUPING_SCOPE_ORDER.includes(scope) ? scope : 'global';
+  }
+
+  function getQuickGroupingScopeLabel(scope) {
+    switch (normalizeQuickGroupingScope(scope)) {
+      case 'preset': return '预设';
+      case 'scoped': return '局部';
+      case 'global':
+      default:
+        return '全局';
+    }
+  }
+
+  function normalizeQuickGroupingFormat(format) {
+    return String(format ?? '') === 'dash' ? 'dash' : 'bracket';
+  }
+
+  function getQuickGroupingSelectedKeys(scope) {
+    const normalizedScope = normalizeQuickGroupingScope(scope);
+    return Array.isArray(quickGroupingSelections[normalizedScope]) ? quickGroupingSelections[normalizedScope] : [];
+  }
+
+  function setQuickGroupingSelectedKeys(scope, values) {
+    quickGroupingSelections[normalizeQuickGroupingScope(scope)] = uniqStrings(values);
+  }
+
+  function getQuickGroupingLeafName(item) {
+    const leaf = String(item?.leaf ?? '').trimStart();
+    if (leaf) return leaf;
+
+    const group2 = String(item?.group2 ?? '').trim();
+    if (group2) return group2;
+
+    const group1 = String(item?.group1 ?? '').trim();
+    if (group1) return group1;
+
+    return String(item?.rawName ?? item?.name ?? '').trimStart();
+  }
+
+  function buildQuickGroupedScriptName({ leaf, group1, group2, format1, format2 }) {
+    const leafText = String(leaf ?? '').trimStart();
+    const group1Text = String(group1 ?? '').trim();
+    const group2Text = String(group2 ?? '').trim();
+    const level1Format = normalizeQuickGroupingFormat(format1);
+    const level2Format = normalizeQuickGroupingFormat(format2);
+
+    const applyOne = (prefix, rest, format) => {
+      const prefixText = String(prefix ?? '').trim();
+      const restText = String(rest ?? '').trimStart();
+      if (!prefixText) return restText;
+      return format === 'dash' ? `${prefixText}-${restText}` : `【${prefixText}】${restText}`;
+    };
+
+    if (!group1Text) return leafText;
+    const withGroup2 = group2Text ? applyOne(group2Text, leafText, level2Format) : leafText;
+    return applyOne(group1Text, withGroup2, level1Format);
+  }
+
+  async function loadQuickGroupingItems(scope) {
+    const normalizedScope = normalizeQuickGroupingScope(scope);
+    const engine = await importRegexEngine();
+    if (!engine) throw new Error('Regex engine 不可用');
+
+    const scriptType = getRegexScopeType(normalizedScope, engine.SCRIPT_TYPES);
+    const scripts = Array.isArray(engine.getScriptsByType(scriptType)) ? [...engine.getScriptsByType(scriptType)] : [];
+
+    return scripts.map((script, index) => {
+      const rawName = String(script?.scriptName ?? '');
+      const parsed = parseGroupNameSegments(rawName);
+      const group1 = String(parsed?.segments?.[0]?.value ?? '').trim();
+      const group2 = String(parsed?.segments?.[1]?.value ?? '').trim();
+      const itemKey = script?.id !== undefined && script?.id !== null ? String(script.id) : `__${normalizedScope}_${index}`;
+
+      return {
+        key: itemKey,
+        id: script?.id !== undefined && script?.id !== null ? String(script.id) : '',
+        index,
+        name: rawName.trim() || `（未命名正则 ${index + 1}）`,
+        rawName,
+        group1,
+        group2,
+        leaf: String(parsed?.rest ?? '').trimStart(),
+        disabled: !!script?.disabled,
+      };
+    });
+  }
+
+  async function applyQuickGroupingUpdates(scope, updatesMap) {
+    const normalizedScope = normalizeQuickGroupingScope(scope);
+    const updates = updatesMap instanceof Map ? updatesMap : new Map(Object.entries(updatesMap || {}));
+    if (updates.size < 1) return { changedCount: 0 };
+
+    const engine = await importRegexEngine();
+    if (!engine) throw new Error('Regex engine 不可用');
+
+    const scriptType = getRegexScopeType(normalizedScope, engine.SCRIPT_TYPES);
+    const scripts = Array.isArray(engine.getScriptsByType(scriptType)) ? [...engine.getScriptsByType(scriptType)] : [];
+
+    let changedCount = 0;
+    const nextScripts = scripts.map((script, index) => {
+      const itemKey = script?.id !== undefined && script?.id !== null ? String(script.id) : `__${normalizedScope}_${index}`;
+      if (!updates.has(itemKey)) return script;
+
+      const currentName = String(script?.scriptName ?? '').trim();
+      const nextName = String(updates.get(itemKey) ?? '').trim();
+      if (!nextName || nextName === currentName) return script;
+
+      changedCount += 1;
+      return { ...script, scriptName: nextName };
+    });
+
+    if (changedCount < 1) return { changedCount: 0 };
+
+    await engine.saveScriptsByType(nextScripts, scriptType);
+    await triggerRegexUiRefresh();
+    return { changedCount };
+  }
+
+  function ensureQuickGroupingModal() {
+    const existing = document.getElementById(QUICK_GROUPING_MODAL_ID);
+    if (existing instanceof HTMLElement) return existing;
+
+    const modal = document.createElement('div');
+    modal.id = QUICK_GROUPING_MODAL_ID;
+    modal.className = 'st-rgs-quick-grouping-modal st-rgs-hidden';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+
+    modal.innerHTML = `
+      <div class="st-rgs-qg-backdrop" data-st-rgs-qg-close></div>
+      <div class="st-rgs-qg-panel">
+        <div class="st-rgs-qg-header flex-container alignItemsCenter flexGap10">
+          <div class="st-rgs-qg-header-main flex-container alignItemsCenter flexGap10 flex1">
+            <b class="st-rgs-qg-title">快捷正则分组</b>
+            <div class="st-rgs-qg-tabs"></div>
+          </div>
+          <button type="button" class="menu_button interactable st-rgs-qg-close" data-st-rgs-qg-close title="关闭">✕</button>
+        </div>
+        <div class="st-rgs-qg-body"></div>
+      </div>
+    `;
+
+    modal.addEventListener('click', (e) => {
+      const closeEl = e.target?.closest?.('[data-st-rgs-qg-close]');
+      if (!closeEl) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeQuickGroupingModal();
+    });
+
+    modal.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      closeQuickGroupingModal();
+    });
+
+    document.body.appendChild(modal);
+    return modal;
+  }
+
+  function closeQuickGroupingModal() {
+    const modal = document.getElementById(QUICK_GROUPING_MODAL_ID);
+    if (!modal) return;
+    modal.classList.add('st-rgs-hidden');
+  }
+
+  function renderQuickGroupingCurrentInfo(container, item) {
+    if (!(container instanceof HTMLElement)) return;
+
+    container.innerHTML = '';
+
+    const label = document.createElement('span');
+    label.className = 'st-rgs-qg-current-label';
+    label.textContent = '当前：';
+    container.appendChild(label);
+
+    const group1 = String(item?.group1 ?? '').trim();
+    const group2 = String(item?.group2 ?? '').trim();
+    const leaf = getQuickGroupingLeafName(item);
+    if (!group1) {
+      const noPrefix = document.createElement('span');
+      noPrefix.className = 'st-rgs-qg-current-none';
+      noPrefix.textContent = '无前缀';
+      container.appendChild(noPrefix);
+      return;
+    }
+
+    const createArrow = () => {
+      const arrow = document.createElement('span');
+      arrow.className = 'st-rgs-qg-current-arrow';
+      arrow.textContent = ' → ';
+      return arrow;
+    };
+
+    const group1El = document.createElement('span');
+    group1El.className = 'st-rgs-qg-current-group1';
+    group1El.textContent = group1;
+    container.appendChild(group1El);
+
+    if (group2) {
+      container.appendChild(createArrow());
+      const group2El = document.createElement('span');
+      group2El.className = 'st-rgs-qg-current-group2';
+      group2El.textContent = group2;
+      container.appendChild(group2El);
+    }
+
+    container.appendChild(createArrow());
+    const leafEl = document.createElement('span');
+    leafEl.className = 'st-rgs-qg-current-leaf';
+    leafEl.textContent = leaf;
+    container.appendChild(leafEl);
+  }
+
+  async function renderQuickGroupingModal(scope, { statusMessage = '' } = {}) {
+    const normalizedScope = normalizeQuickGroupingScope(scope);
+    quickGroupingActiveScope = normalizedScope;
+
+    const modal = ensureQuickGroupingModal();
+    const body = modal.querySelector('.st-rgs-qg-body');
+    if (!(body instanceof HTMLElement)) return;
+
+    const tabsEl = modal.querySelector('.st-rgs-qg-tabs');
+
+    const currentToken = ++quickGroupingRenderToken;
+    body.innerHTML = `<div class="st-rgs-qg-loading">正在加载 ${getQuickGroupingScopeLabel(normalizedScope)}...</div>`;
+
+    try {
+      const items = await loadQuickGroupingItems(normalizedScope);
+      if (currentToken !== quickGroupingRenderToken) return;
+
+      body.innerHTML = '';
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'st-rgs-qg-wrapper';
+      const SEARCH_SUGGESTIONS_ID = `st-rgs-qg-search-suggestions-${normalizedScope}`;
+      const GROUP1_SUGGESTIONS_ID = `st-rgs-qg-group1-suggestions-${normalizedScope}`;
+      const GROUP2_SUGGESTIONS_ID = `st-rgs-qg-group2-suggestions-${normalizedScope}`;
+      wrapper.innerHTML = `
+        <div class="st-rgs-qg-tip">批量给正则添加/修改分组前缀。支持 <code>【分组】</code> 与 <code>分组-</code> 两种格式；一级分组留空时等同于清除前缀。</div>
+        <div class="st-rgs-qg-controls">
+          <div class="st-rgs-qg-row flex-container flexGap10 alignItemsCenter flex-wrap">
+            <input type="text" class="text_pole st-rgs-qg-filter-input" data-st-rgs-qg="filter" placeholder="搜索当前范围正则" list="${SEARCH_SUGGESTIONS_ID}">
+          </div>
+          <div class="st-rgs-qg-row st-rgs-qg-prefix-row">
+            <select class="text_pole st-rgs-qg-format-select" data-st-rgs-qg="format1">
+              <option value="bracket">【】包裹</option>
+              <option value="dash">- 分割</option>
+            </select>
+            <input type="text" class="text_pole st-rgs-qg-group-input" data-st-rgs-qg="group1" placeholder="一级分组（留空=清除前缀）" list="${GROUP1_SUGGESTIONS_ID}">
+            <select class="text_pole st-rgs-qg-format-select" data-st-rgs-qg="format2">
+              <option value="bracket">【】包裹</option>
+              <option value="dash">- 分割</option>
+            </select>
+            <input type="text" class="text_pole st-rgs-qg-group-input" data-st-rgs-qg="group2" placeholder="二级分组（可选）" list="${GROUP2_SUGGESTIONS_ID}">
+          </div>
+          <div class="st-rgs-qg-row flex-container flexGap10 alignItemsCenter flex-wrap">
+            <button type="button" class="menu_button interactable" data-st-rgs-qg="apply">应用</button>
+            <button type="button" class="menu_button interactable caution" data-st-rgs-qg="clear">清除前缀</button>
+            <button type="button" class="menu_button interactable" data-st-rgs-qg="select-all">全选</button>
+            <button type="button" class="menu_button interactable" data-st-rgs-qg="invert">反选</button>
+          </div>
+          <div class="st-rgs-qg-status" data-st-rgs-qg="status"></div>
+          <datalist id="${SEARCH_SUGGESTIONS_ID}"></datalist>
+          <datalist id="${GROUP1_SUGGESTIONS_ID}"></datalist>
+          <datalist id="${GROUP2_SUGGESTIONS_ID}"></datalist>
+        </div>
+        <div class="st-rgs-qg-list"></div>
+      `;
+
+      body.appendChild(wrapper);
+
+      const listEl = wrapper.querySelector('.st-rgs-qg-list');
+      const filterInput = wrapper.querySelector('[data-st-rgs-qg="filter"]');
+      const group1Input = wrapper.querySelector('[data-st-rgs-qg="group1"]');
+      const group2Input = wrapper.querySelector('[data-st-rgs-qg="group2"]');
+      const format1Select = wrapper.querySelector('[data-st-rgs-qg="format1"]');
+      const format2Select = wrapper.querySelector('[data-st-rgs-qg="format2"]');
+      const statusEl = wrapper.querySelector('[data-st-rgs-qg="status"]');
+      const applyBtn = wrapper.querySelector('[data-st-rgs-qg="apply"]');
+      const clearBtn = wrapper.querySelector('[data-st-rgs-qg="clear"]');
+      const selectAllBtn = wrapper.querySelector('[data-st-rgs-qg="select-all"]');
+      const invertBtn = wrapper.querySelector('[data-st-rgs-qg="invert"]');
+      const searchSuggestionsEl = wrapper.querySelector(`#${SEARCH_SUGGESTIONS_ID}`);
+      const group1SuggestionsEl = wrapper.querySelector(`#${GROUP1_SUGGESTIONS_ID}`);
+      const group2SuggestionsEl = wrapper.querySelector(`#${GROUP2_SUGGESTIONS_ID}`);
+      if (tabsEl instanceof HTMLElement) tabsEl.innerHTML = '';
+
+      for (const scopeKey of QUICK_GROUPING_SCOPE_ORDER) {
+        const tabBtn = document.createElement('button');
+        tabBtn.type = 'button';
+        tabBtn.className = 'menu_button interactable st-rgs-qg-tab';
+        tabBtn.dataset.stRgsQgTab = scopeKey;
+        tabBtn.dataset.active = scopeKey === normalizedScope ? '1' : '0';
+        tabBtn.textContent = getQuickGroupingScopeLabel(scopeKey);
+        tabBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void renderQuickGroupingModal(scopeKey);
+        });
+        tabsEl?.appendChild(tabBtn);
+      }
+
+      if (filterInput instanceof HTMLInputElement) filterInput.value = String(quickGroupingDraftState.filter ?? '');
+      if (group1Input instanceof HTMLInputElement) group1Input.value = String(quickGroupingDraftState.group1 ?? '');
+      if (group2Input instanceof HTMLInputElement) group2Input.value = String(quickGroupingDraftState.group2 ?? '');
+      if (format1Select instanceof HTMLSelectElement) format1Select.value = normalizeQuickGroupingFormat(quickGroupingDraftState.format1);
+      if (format2Select instanceof HTMLSelectElement) format2Select.value = normalizeQuickGroupingFormat(quickGroupingDraftState.format2);
+      if (statusEl instanceof HTMLElement) statusEl.textContent = String(statusMessage || '');
+
+      const selectionSet = new Set(getQuickGroupingSelectedKeys(normalizedScope));
+      const rowEntries = [];
+      const listEmptyEl = document.createElement('div');
+      listEmptyEl.className = 'st-rgs-qg-empty';
+      listEl?.appendChild(listEmptyEl);
+
+      const fillSuggestions = (datalistEl, values) => {
+        if (!(datalistEl instanceof HTMLDataListElement)) return;
+        datalistEl.innerHTML = '';
+
+        for (const value of uniqStrings(values).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))) {
+          const text = String(value ?? '').trim();
+          if (!text) continue;
+          const optionEl = document.createElement('option');
+          optionEl.value = text;
+          datalistEl.appendChild(optionEl);
+        }
+      };
+
+      const refreshAutocompleteSuggestions = () => {
+        const group1Values = rowEntries.map(({ item }) => String(item?.group1 ?? '').trim()).filter(Boolean);
+        const group2Values = rowEntries.map(({ item }) => String(item?.group2 ?? '').trim()).filter(Boolean);
+        const searchValues = [
+          ...group1Values,
+          ...group2Values,
+        ];
+
+        fillSuggestions(searchSuggestionsEl, searchValues);
+        fillSuggestions(group1SuggestionsEl, group1Values);
+        fillSuggestions(group2SuggestionsEl, group2Values);
+      };
+
+      const updateSelectAllButtonLabel = () => {
+        if (!(selectAllBtn instanceof HTMLButtonElement)) return;
+        const visibleRows = getVisibleRows();
+        const hasVisibleRows = visibleRows.length > 0;
+        const allVisibleSelected = hasVisibleRows && visibleRows.every(
+          ({ checkboxEl }) => checkboxEl instanceof HTMLInputElement && checkboxEl.checked
+        );
+        selectAllBtn.textContent = allVisibleSelected ? '取消全选' : '全选';
+      };
+
+      const updateRowSelectionUi = (entry) => {
+        if (!entry?.rowEl || !(entry.checkboxEl instanceof HTMLInputElement)) return;
+        entry.rowEl.classList.toggle('st-rgs-qg-item-selected', !!entry.checkboxEl.checked);
+      };
+
+      const syncSelectionState = () => {
+        for (const entry of rowEntries) {
+          updateRowSelectionUi(entry);
+        }
+
+        const selectedKeys = rowEntries
+          .filter(({ checkboxEl }) => checkboxEl instanceof HTMLInputElement && checkboxEl.checked)
+          .map(({ item }) => item.key);
+        setQuickGroupingSelectedKeys(normalizedScope, selectedKeys);
+        updateSelectAllButtonLabel();
+      };
+
+      const updateRowEntryDisplay = (entry, nextName) => {
+        if (!entry?.item) return;
+
+        const parsed = parseGroupNameSegments(nextName);
+        entry.item.rawName = String(nextName ?? '');
+        entry.item.name = entry.item.rawName.trim() || `（未命名正则 ${Number(entry.item.index ?? 0) + 1}）`;
+        entry.item.group1 = String(parsed?.segments?.[0]?.value ?? '').trim();
+        entry.item.group2 = String(parsed?.segments?.[1]?.value ?? '').trim();
+        entry.item.leaf = String(parsed?.rest ?? '').trimStart();
+        if (entry.titleEl instanceof HTMLElement) entry.titleEl.textContent = entry.item.name;
+        renderQuickGroupingCurrentInfo(entry.subEl, entry.item);
+        entry.searchText = `${entry.item.name}\n${entry.item.rawName}\n${entry.item.group1}\n${entry.item.group2}\n${getQuickGroupingLeafName(entry.item)}`;
+      };
+
+      if (items.length > 0 && listEl instanceof HTMLElement) {
+        for (const item of items) {
+          const rowEl = document.createElement('div');
+          rowEl.className = 'st-rgs-qg-item';
+          rowEl.dataset.stRgsQgItem = '1';
+
+          const checkboxEl = document.createElement('input');
+          checkboxEl.type = 'checkbox';
+          checkboxEl.value = item.key;
+          checkboxEl.checked = selectionSet.has(item.key);
+
+          const textWrapEl = document.createElement('div');
+          textWrapEl.className = 'st-rgs-qg-item-text';
+
+          const titleRowEl = document.createElement('div');
+          titleRowEl.className = 'st-rgs-qg-item-title-row';
+
+          const titleEl = document.createElement('div');
+          titleEl.className = 'st-rgs-qg-item-title';
+          titleEl.textContent = item.name;
+          titleRowEl.appendChild(titleEl);
+
+          if (item.disabled) {
+            const badgeEl = document.createElement('span');
+            badgeEl.className = 'st-rgs-qg-item-badge';
+            badgeEl.textContent = '已禁用';
+            titleRowEl.appendChild(badgeEl);
+          }
+
+          const subEl = document.createElement('div');
+          subEl.className = 'st-rgs-qg-item-sub';
+          renderQuickGroupingCurrentInfo(subEl, item);
+
+          textWrapEl.appendChild(titleRowEl);
+          textWrapEl.appendChild(subEl);
+          rowEl.appendChild(checkboxEl);
+          rowEl.appendChild(textWrapEl);
+          listEl.appendChild(rowEl);
+
+          checkboxEl.addEventListener('change', syncSelectionState);
+
+          rowEl.addEventListener('click', (e) => {
+            const target = e.target;
+            if (target instanceof HTMLElement && (target.tagName === 'INPUT' || target.closest('input'))) return;
+            checkboxEl.checked = !checkboxEl.checked;
+            syncSelectionState();
+          });
+
+          rowEntries.push({
+            item,
+            rowEl,
+            checkboxEl,
+            titleEl,
+            subEl,
+            searchText: `${item.name}\n${item.rawName}\n${item.group1}\n${item.group2}\n${getQuickGroupingLeafName(item)}`,
+          });
+        }
+        refreshAutocompleteSuggestions();
+      }
+
+      const setStatus = (message) => {
+        if (statusEl instanceof HTMLElement) statusEl.textContent = String(message || '');
+      };
+
+      const getVisibleRows = () => rowEntries.filter(({ rowEl }) => !rowEl.classList.contains('st-rgs-qg-item-hidden'));
+
+      const applyFilter = () => {
+        const query = filterInput instanceof HTMLInputElement ? filterInput.value : '';
+        quickGroupingDraftState.filter = query;
+
+        let visibleCount = 0;
+        for (const entry of rowEntries) {
+          const matched = !normalizeSearchText(query) || fuzzyMatches(entry.searchText, query);
+          entry.rowEl.classList.toggle('st-rgs-qg-item-hidden', !matched);
+          if (matched) visibleCount += 1;
+        }
+
+        if (items.length < 1) {
+          listEmptyEl.textContent = `当前范围暂无可编辑的${getQuickGroupingScopeLabel(normalizedScope)}`;
+          listEmptyEl.classList.remove('st-rgs-qg-empty-hidden');
+          updateSelectAllButtonLabel();
+          return;
+        }
+
+        if (visibleCount < 1) {
+          listEmptyEl.textContent = '当前筛选条件下没有匹配的正则';
+          listEmptyEl.classList.remove('st-rgs-qg-empty-hidden');
+          updateSelectAllButtonLabel();
+          return;
+        }
+
+        listEmptyEl.classList.add('st-rgs-qg-empty-hidden');
+        updateSelectAllButtonLabel();
+      };
+
+      filterInput?.addEventListener('input', applyFilter);
+      group1Input?.addEventListener('input', () => { quickGroupingDraftState.group1 = group1Input.value; });
+      group2Input?.addEventListener('input', () => { quickGroupingDraftState.group2 = group2Input.value; });
+      format1Select?.addEventListener('change', () => { quickGroupingDraftState.format1 = normalizeQuickGroupingFormat(format1Select.value); });
+      format2Select?.addEventListener('change', () => { quickGroupingDraftState.format2 = normalizeQuickGroupingFormat(format2Select.value); });
+
+      const updateVisibleSelection = (mode) => {
+        const visibleRows = getVisibleRows();
+        const allVisibleSelected = visibleRows.length > 0 && visibleRows.every(
+          ({ checkboxEl }) => checkboxEl instanceof HTMLInputElement && checkboxEl.checked
+        );
+
+        for (const { checkboxEl } of visibleRows) {
+          if (!(checkboxEl instanceof HTMLInputElement)) continue;
+          if (mode === 'toggle-all') checkboxEl.checked = !allVisibleSelected;
+          if (mode === 'invert') checkboxEl.checked = !checkboxEl.checked;
+        }
+        syncSelectionState();
+      };
+
+      selectAllBtn?.addEventListener('click', () => updateVisibleSelection('toggle-all'));
+      invertBtn?.addEventListener('click', () => updateVisibleSelection('invert'));
+
+      const setBusy = (busy) => {
+        for (const controlEl of wrapper.querySelectorAll('button, input, select')) {
+          if (controlEl instanceof HTMLButtonElement || controlEl instanceof HTMLInputElement || controlEl instanceof HTMLSelectElement) {
+            controlEl.disabled = !!busy;
+          }
+        }
+      };
+
+      const applyUpdates = async (mode) => {
+        const selectedKeys = rowEntries
+          .filter(({ checkboxEl }) => checkboxEl instanceof HTMLInputElement && checkboxEl.checked)
+          .map(({ item }) => item.key);
+
+        if (selectedKeys.length < 1) {
+          setStatus('未选择任何正则脚本');
+          return;
+        }
+
+        let group1 = group1Input instanceof HTMLInputElement ? group1Input.value.trim() : '';
+        let group2 = group2Input instanceof HTMLInputElement ? group2Input.value.trim() : '';
+        const format1 = format1Select instanceof HTMLSelectElement ? format1Select.value : 'bracket';
+        const format2 = format2Select instanceof HTMLSelectElement ? format2Select.value : 'bracket';
+
+        try {
+          if (mode !== 'clear') {
+            if (group1) group1 = normalizeGroupRenameInput(group1);
+            if (group2) group2 = normalizeGroupRenameInput(group2);
+          }
+        } catch (err) {
+          setStatus(`失败：${String(err?.message || err)}`);
+          return;
+        }
+
+        const itemMap = new Map(items.map((item) => [item.key, item]));
+        const updates = new Map();
+
+        for (const key of selectedKeys) {
+          const item = itemMap.get(key);
+          if (!item) continue;
+
+          const leaf = getQuickGroupingLeafName(item);
+          const nextName = mode === 'clear'
+            ? leaf
+            : buildQuickGroupedScriptName({ leaf, group1, group2, format1, format2 });
+          updates.set(key, nextName);
+        }
+
+        if (updates.size < 1) {
+          setStatus('没有可更新的条目');
+          return;
+        }
+
+        const confirmed = await confirmWithNativePopup(`将修改 ${updates.size} 条${getQuickGroupingScopeLabel(normalizedScope)}的分组前缀，是否继续？`);
+        if (!confirmed) return;
+
+        setBusy(true);
+        setStatus('处理中...');
+        setQuickGroupingSelectedKeys(normalizedScope, selectedKeys);
+
+        try {
+          const { changedCount } = await applyQuickGroupingUpdates(normalizedScope, updates);
+          if (changedCount > 0) {
+            for (const [key, nextName] of updates.entries()) {
+              const entry = rowEntries.find(({ item }) => item?.key === key);
+              if (!entry) continue;
+              updateRowEntryDisplay(entry, nextName);
+              flashElement(entry.rowEl, 'st-rgs-qg-item-updated', 1800);
+              updateRowSelectionUi(entry);
+            }
+            refreshAutocompleteSuggestions();
+            applyFilter();
+            setStatus(`完成：已更新 ${changedCount} 项`);
+          } else {
+            setStatus('没有需要更新的条目');
+          }
+
+          setBusy(false);
+        } catch (err) {
+          setBusy(false);
+          setStatus(`失败：${String(err?.message || err)}`);
+        }
+      };
+
+      applyBtn?.addEventListener('click', () => void applyUpdates('apply'));
+      clearBtn?.addEventListener('click', () => void applyUpdates('clear'));
+      applyFilter();
+      syncSelectionState();
+    } catch (err) {
+      if (currentToken !== quickGroupingRenderToken) return;
+      body.innerHTML = `<div class="st-rgs-qg-loading">加载失败：${String(err?.message || err)}</div>`;
+    }
+  }
+
+  function openQuickGroupingModal(scope = quickGroupingActiveScope) {
+    const modal = ensureQuickGroupingModal();
+    modal.classList.remove('st-rgs-hidden');
+    modal.tabIndex = -1;
+    modal.focus?.();
+    void renderQuickGroupingModal(scope);
+  }
+
   // =====================
   // Panel Controller (per block)
   // =====================
@@ -720,6 +1738,12 @@
     // 组折叠状态持久化：{ [groupKey]: true/false }
     const STORAGE_KEY_GROUP_COLLAPSE = `${MODULE_NAME}:${scope}:groupCollapse`;
 
+    // 组开关占位状态持久化：{ [groupKey]: true/false }，true 表示“禁用/关闭”视觉状态
+    const STORAGE_KEY_GROUP_DISABLED = `${MODULE_NAME}:${scope}:groupDisabled`;
+
+    // 组开关恢复快照：{ [groupKey]: { [scriptId]: boolean } }，boolean 为脚本原始 disabled 状态
+    const STORAGE_KEY_GROUP_DISABLED_SNAPSHOT = `${MODULE_NAME}:${scope}:groupDisabledSnapshot`;
+
     // 一级分组置顶（图钉）持久化：string[]
     const STORAGE_KEY_PINNED_GROUPS = `${MODULE_NAME}:${scope}:pinnedGroups`;
 
@@ -732,6 +1756,8 @@
     let groupingEnabled = loadBool(STORAGE_KEY_GROUPING, false);
     let subgroupEnabled = loadBool(STORAGE_KEY_SUBGROUP, true);
     let groupCollapseState = loadJson(STORAGE_KEY_GROUP_COLLAPSE, {});
+    let groupDisabledState = loadJson(STORAGE_KEY_GROUP_DISABLED, {});
+    let groupDisabledSnapshots = loadJson(STORAGE_KEY_GROUP_DISABLED_SNAPSHOT, {});
     let collapsedState = loadBool(STORAGE_KEY_COLLAPSED, false);
     let searchQuery = getSharedSearchQuery();
 
@@ -867,6 +1893,8 @@
         itemEl.dataset.stRgsSearchMatch = matched ? '1' : '0';
         itemEl.classList.toggle(SEARCH_HIDDEN_CLASS, !matched);
       }
+
+      applyForcedDisabledUi(listEl);
     }
 
     // === 分组展示 ===
@@ -889,7 +1917,673 @@
       if (txt) return txt;
       // 兜底：有些版本可能放在 title
       const title = nameEl?.getAttribute?.('title');
-      return (title || '').trim();
+      if (title) return title.trim();
+      return String(itemEl?.dataset?.stRgsRawScriptName || '').trim();
+    }
+
+    function getGroupHeaderContext(headerEl) {
+      if (!headerEl) return null;
+      const level = Number(headerEl.dataset.stRgsLevel || 0);
+      const group1 = String(headerEl.dataset.stRgsGroup1 || '');
+      const group2 = String(headerEl.dataset.stRgsGroup2 || '');
+      if (!level || !group1) return null;
+      return {
+        level,
+        group1,
+        group2,
+        currentName: level === 1 ? group1 : group2,
+      };
+    }
+
+    function getGroupScriptItemEls(listEl, groupContext) {
+      if (!listEl || !groupContext) return [];
+      return getScriptItemEls(listEl).filter((itemEl) => {
+        if (String(itemEl?.dataset?.stRgsGroup1 || '') !== groupContext.group1) return false;
+        if (groupContext.level === 2) {
+          return String(itemEl?.dataset?.stRgsGroup2 || '') === groupContext.group2;
+        }
+        return true;
+      });
+    }
+
+    function applyScriptItemForcedDisabledUi(listEl) {
+      if (!listEl?.isConnected) return;
+
+      for (const itemEl of getScriptItemEls(listEl)) {
+        const scriptId = String(itemEl?.dataset?.regexScriptId || '');
+        const groupContext = resolveItemGroupContext(itemEl, { subgroupEnabled });
+        const activeDisabledKeys = getActiveDisabledGroupKeys(groupDisabledState, groupContext.keys);
+        const forcedDisabled = activeDisabledKeys.length > 0;
+        const preferredState = findPreferredGroupSnapshotState(groupDisabledSnapshots, activeDisabledKeys, scriptId);
+
+        itemEl.classList.toggle('st-rgs-group-forced-disabled', forcedDisabled);
+        itemEl.dataset.stRgsGroupForcedDisabled = forcedDisabled ? '1' : '0';
+
+        const inputEl = itemEl.querySelector('.disable_regex');
+        const titleEl = itemEl.querySelector('.regex_script_name');
+        if (titleEl?.classList) {
+          titleEl.classList.toggle('st-rgs-group-title-disabled', forcedDisabled);
+        }
+
+        if (inputEl instanceof HTMLInputElement) {
+          const rawDisabled = itemEl?.dataset?.stRgsRawScriptDisabled === '1';
+
+          if (forcedDisabled && preferredState !== undefined && inputEl.checked !== preferredState) {
+            inputEl.checked = preferredState;
+          }
+
+          if (!forcedDisabled && inputEl.checked !== rawDisabled) {
+            inputEl.checked = rawDisabled;
+          }
+
+          inputEl.disabled = forcedDisabled;
+
+          if (!forcedDisabled) {
+            delete inputEl.dataset.stRgsForcedDisabled;
+          } else {
+            inputEl.dataset.stRgsForcedDisabled = '1';
+          }
+        }
+      }
+    }
+
+    function applyGroupHeaderToggleForcedDisabledUi(listEl) {
+      if (!listEl?.isConnected) return;
+
+      for (const headerEl of getGroupHeaderEls(listEl)) {
+        const groupContext = getGroupHeaderContext(headerEl);
+        if (!groupContext) continue;
+
+        const toggleLabelEl = headerEl.querySelector('.st-rgs-group-toggle-checkbox');
+        const toggleInputEl = headerEl.querySelector('.st-rgs-group-disable-toggle');
+        if (!(toggleInputEl instanceof HTMLInputElement)) continue;
+
+        const forcedDisabled = groupContext.level > 1 && !!groupDisabledState[makeGroupKey(groupContext.group1)];
+        toggleInputEl.disabled = forcedDisabled;
+        toggleInputEl.dataset.stRgsForcedDisabled = forcedDisabled ? '1' : '0';
+
+        if (toggleLabelEl?.dataset) {
+          toggleLabelEl.dataset.stRgsToggleLocked = forcedDisabled ? '1' : '0';
+        }
+
+        headerEl.dataset.stRgsGroupToggleLocked = forcedDisabled ? '1' : '0';
+      }
+    }
+
+    function applyForcedDisabledUi(listEl) {
+      applyScriptItemForcedDisabledUi(listEl);
+      applyGroupHeaderToggleForcedDisabledUi(listEl);
+    }
+
+    function updateSnapshotsForManualScriptToggle(itemEl, nextDisabled) {
+      const scriptId = String(itemEl?.dataset?.regexScriptId || '');
+      if (!scriptId) return false;
+
+      const groupContext = resolveItemGroupContext(itemEl, { subgroupEnabled });
+      const activeDisabledKeys = sortGroupKeysBySpecificity(getActiveDisabledGroupKeys(groupDisabledState, groupContext.keys));
+      if (activeDisabledKeys.length < 1) return false;
+
+      for (const key of activeDisabledKeys) {
+        const currentSnapshot = groupDisabledSnapshots[key] && typeof groupDisabledSnapshots[key] === 'object'
+          ? { ...groupDisabledSnapshots[key] }
+          : {};
+        currentSnapshot[scriptId] = !!nextDisabled;
+        groupDisabledSnapshots[key] = currentSnapshot;
+      }
+
+      debugGroupState('manual-script-toggle-while-group-disabled', {
+        scope,
+        scriptId,
+        nextDisabled: !!nextDisabled,
+        activeDisabledKeys,
+        snapshots: activeDisabledKeys.reduce((acc, key) => ({ ...acc, [key]: groupDisabledSnapshots[key] }), {}),
+      });
+
+      saveGroupDisabledSnapshots();
+      return true;
+    }
+
+    async function syncRegexScriptIdsToList(listEl) {
+      if (!listEl?.isConnected) return false;
+
+      const items = getScriptItemEls(listEl);
+      if (items.length < 1) return false;
+
+      const engine = await importRegexEngine();
+      if (!engine) return false;
+
+      const { SCRIPT_TYPES, getScriptsByType } = engine;
+      const scriptType = getRegexScopeType(scope, SCRIPT_TYPES);
+      const rawScripts = Array.isArray(getScriptsByType(scriptType)) ? getScriptsByType(scriptType) : [];
+      if (rawScripts.length < 1) return false;
+
+      const assignScriptMeta = (itemEl, rawScript) => {
+        if (!itemEl || !rawScript) return;
+        if (rawScript.id !== undefined && rawScript.id !== null) itemEl.dataset.regexScriptId = String(rawScript.id);
+        itemEl.dataset.stRgsScope = scope;
+        itemEl.dataset.stRgsRawScriptName = String(rawScript.scriptName || '');
+        itemEl.dataset.stRgsRawScriptDisabled = rawScript.disabled ? '1' : '0';
+      };
+
+      if (items.length === rawScripts.length) {
+        items.forEach((itemEl, index) => assignScriptMeta(itemEl, rawScripts[index]));
+        applyForcedDisabledUi(listEl);
+        return true;
+      }
+
+      const rawEntries = rawScripts.map((rawScript, index) => ({
+        rawScript,
+        index,
+        name: String(rawScript?.scriptName || ''),
+        used: false,
+      }));
+
+      let assignedCount = 0;
+      for (const itemEl of items) {
+        const displayName = getScriptDisplayName(itemEl);
+        const matchedEntry = rawEntries.find((entry) => !entry.used && entry.name === displayName);
+        if (!matchedEntry) continue;
+        matchedEntry.used = true;
+        assignScriptMeta(itemEl, matchedEntry.rawScript);
+        assignedCount += 1;
+      }
+
+      for (const itemEl of items) {
+        if (itemEl?.dataset?.regexScriptId) continue;
+        const nextEntry = rawEntries.find((entry) => !entry.used);
+        if (!nextEntry) break;
+        nextEntry.used = true;
+        assignScriptMeta(itemEl, nextEntry.rawScript);
+        assignedCount += 1;
+      }
+
+      applyForcedDisabledUi(listEl);
+      return assignedCount > 0;
+    }
+
+    let regexScriptIdSyncScheduled = false;
+
+    function requestRegexScriptIdSync(listEl = getScriptsListEl()) {
+      if (regexScriptIdSyncScheduled || !listEl) return;
+      regexScriptIdSyncScheduled = true;
+
+      schedule(async () => {
+        regexScriptIdSyncScheduled = false;
+        try {
+          await syncRegexScriptIdsToList(listEl);
+        } catch (err) {
+          warn(`sync regex script ids failed (${scope})`, err);
+        }
+      });
+    }
+
+    function saveGroupDisabledState() {
+      saveJson(STORAGE_KEY_GROUP_DISABLED, groupDisabledState);
+    }
+
+    function saveGroupDisabledSnapshots() {
+      saveJson(STORAGE_KEY_GROUP_DISABLED_SNAPSHOT, groupDisabledSnapshots);
+    }
+
+    function remapGroupStateKeys(groupContext, state, newName) {
+      const nextState = {};
+
+      if (groupContext.level === 1) {
+        const oldGroup1Key = makeGroupKey(groupContext.group1);
+        const newGroup1Key = makeGroupKey(newName);
+
+        for (const [key, value] of Object.entries(state || {})) {
+          if (key === oldGroup1Key) nextState[newGroup1Key] = value;
+          else if (key.startsWith(`${groupContext.group1}${GROUP_KEY_SEP}`)) nextState[`${newName}${key.slice(groupContext.group1.length)}`] = value;
+          else nextState[key] = value;
+        }
+
+        return nextState;
+      }
+
+      const oldSubgroupKey = makeGroupKey(groupContext.group1, groupContext.group2);
+      const newSubgroupKey = makeGroupKey(groupContext.group1, newName);
+      for (const [key, value] of Object.entries(state || {})) {
+        nextState[key === oldSubgroupKey ? newSubgroupKey : key] = value;
+      }
+
+      return nextState;
+    }
+
+    function clearGroupStateKeys(groupContext) {
+      if (!groupContext) return;
+
+      const clearObjectState = (source) => {
+        const next = {};
+        for (const [key, value] of Object.entries(source || {})) {
+          if (groupContext.level === 1) {
+            if (key === makeGroupKey(groupContext.group1)) continue;
+            if (key.startsWith(`${groupContext.group1}${GROUP_KEY_SEP}`)) continue;
+          } else {
+            if (key === makeGroupKey(groupContext.group1, groupContext.group2)) continue;
+          }
+          next[key] = value;
+        }
+        return next;
+      };
+
+      groupCollapseState = clearObjectState(groupCollapseState);
+      groupDisabledState = clearObjectState(groupDisabledState);
+      groupDisabledSnapshots = clearObjectState(groupDisabledSnapshots);
+      saveJson(STORAGE_KEY_GROUP_COLLAPSE, groupCollapseState);
+      saveGroupDisabledState();
+      saveGroupDisabledSnapshots();
+
+      if (groupContext.level === 1) {
+        pinnedGroup1List = uniqStrings(pinnedGroup1List.filter((item) => item !== groupContext.group1));
+        saveJson(STORAGE_KEY_PINNED_GROUPS, pinnedGroup1List);
+      }
+    }
+
+    function transferGroupDisabledStateToScope(groupContext, targetScope) {
+      if (!groupContext) return;
+      const stateKey = makeGroupKey(groupContext.group1, groupContext.group2);
+      if (!groupDisabledState[stateKey] && !groupDisabledSnapshots[stateKey]) return;
+
+      const targetDisabledStorageKey = `${MODULE_NAME}:${targetScope}:groupDisabled`;
+      const targetSnapshotStorageKey = `${MODULE_NAME}:${targetScope}:groupDisabledSnapshot`;
+      const targetDisabledState = loadJson(targetDisabledStorageKey, {});
+      const targetDisabledSnapshots = loadJson(targetSnapshotStorageKey, {});
+
+      if (Object.prototype.hasOwnProperty.call(groupDisabledState, stateKey)) {
+        targetDisabledState[stateKey] = groupDisabledState[stateKey];
+      }
+      if (Object.prototype.hasOwnProperty.call(groupDisabledSnapshots, stateKey)) {
+        targetDisabledSnapshots[stateKey] = groupDisabledSnapshots[stateKey];
+      }
+
+      saveJson(targetDisabledStorageKey, targetDisabledState);
+      saveJson(targetSnapshotStorageKey, targetDisabledSnapshots);
+    }
+
+    function remapGroupUiStateAfterRename(groupContext, newName) {
+      if (!groupContext || !newName) return;
+
+      const nextCollapseState = {};
+      if (groupContext.level === 1) {
+        const oldGroup1Key = makeGroupKey(groupContext.group1);
+        const newGroup1Key = makeGroupKey(newName);
+
+        for (const [key, value] of Object.entries(groupCollapseState || {})) {
+          if (key === oldGroup1Key) {
+            nextCollapseState[newGroup1Key] = value;
+            continue;
+          }
+
+          if (key.startsWith(`${groupContext.group1}${GROUP_KEY_SEP}`)) {
+            nextCollapseState[`${newName}${key.slice(groupContext.group1.length)}`] = value;
+            continue;
+          }
+
+          nextCollapseState[key] = value;
+        }
+
+        groupCollapseState = nextCollapseState;
+        saveJson(STORAGE_KEY_GROUP_COLLAPSE, groupCollapseState);
+
+        groupDisabledState = remapGroupStateKeys(groupContext, groupDisabledState, newName);
+        saveGroupDisabledState();
+
+        groupDisabledSnapshots = remapGroupStateKeys(groupContext, groupDisabledSnapshots, newName);
+        saveGroupDisabledSnapshots();
+
+        pinnedGroup1List = uniqStrings(pinnedGroup1List.map((item) => (item === groupContext.group1 ? newName : item)));
+        saveJson(STORAGE_KEY_PINNED_GROUPS, pinnedGroup1List);
+        return;
+      }
+
+      const oldSubgroupKey = makeGroupKey(groupContext.group1, groupContext.group2);
+      const newSubgroupKey = makeGroupKey(groupContext.group1, newName);
+      for (const [key, value] of Object.entries(groupCollapseState || {})) {
+        nextCollapseState[key === oldSubgroupKey ? newSubgroupKey : key] = value;
+      }
+
+      groupCollapseState = nextCollapseState;
+      saveJson(STORAGE_KEY_GROUP_COLLAPSE, groupCollapseState);
+
+      groupDisabledState = remapGroupStateKeys(groupContext, groupDisabledState, newName);
+      saveGroupDisabledState();
+
+      groupDisabledSnapshots = remapGroupStateKeys(groupContext, groupDisabledSnapshots, newName);
+      saveGroupDisabledSnapshots();
+    }
+
+    async function renameGroupScripts(groupContext, newName) {
+      const listEl = getScriptsListEl();
+      if (!listEl) throw new Error('当前正则列表尚未渲染完成');
+
+      await syncRegexScriptIdsToList(listEl);
+
+      const targetItems = getGroupScriptItemEls(listEl, groupContext);
+      const targetIds = new Set(targetItems.map((itemEl) => String(itemEl?.dataset?.regexScriptId || '')).filter(Boolean));
+      if (targetIds.size < 1) throw new Error('未找到分组对应的脚本 ID');
+
+      const engine = await importRegexEngine();
+      if (!engine) throw new Error('Regex engine 不可用');
+
+      const { SCRIPT_TYPES, getScriptsByType, saveScriptsByType } = engine;
+      const scriptType = getRegexScopeType(scope, SCRIPT_TYPES);
+      const scripts = Array.isArray(getScriptsByType(scriptType)) ? [...getScriptsByType(scriptType)] : [];
+
+      let changedCount = 0;
+      const nextScripts = scripts.map((script) => {
+        const id = String(script?.id ?? '');
+        if (!targetIds.has(id)) return script;
+
+        const nextScriptName = renameGroupedScriptName(script?.scriptName, { ...groupContext, newName });
+        if (!nextScriptName || nextScriptName === script?.scriptName) return script;
+
+        changedCount += 1;
+        return { ...script, scriptName: nextScriptName };
+      });
+
+      if (changedCount < 1) return { changedCount: 0 };
+
+      await saveScriptsByType(nextScripts, scriptType);
+      await triggerRegexUiRefresh();
+      return { changedCount };
+    }
+
+    async function getGroupRawScripts(groupContext, options = {}) {
+      const listEl = getScriptsListEl();
+      if (!listEl) throw new Error('当前正则列表尚未渲染完成');
+
+      await syncRegexScriptIdsToList(listEl);
+      const targetItems = getGroupScriptItemEls(listEl, groupContext);
+      const targetIds = new Set(targetItems.map((itemEl) => String(itemEl?.dataset?.regexScriptId || '')).filter(Boolean));
+      if (targetIds.size < 1) throw new Error('未找到分组对应的脚本 ID');
+
+      const engine = await importRegexEngine();
+      if (!engine) throw new Error('Regex engine 不可用');
+
+      const scriptType = getRegexScopeType(scope, engine.SCRIPT_TYPES);
+      const scripts = Array.isArray(engine.getScriptsByType(scriptType)) ? [...engine.getScriptsByType(scriptType)] : [];
+      const matchedScripts = scripts.filter((script) => targetIds.has(String(script?.id ?? '')));
+
+      if (matchedScripts.length < 1) throw new Error('未找到分组对应的脚本数据');
+
+      if (options.requireScopedValidation) {
+        await ensureScopedMoveAllowed();
+      }
+
+      debugGroupState('resolve-group-raw-scripts', {
+        scope,
+        groupContext,
+        matchedIds: Array.from(targetIds),
+        matchedScripts: summarizeRegexScriptStates(matchedScripts),
+        totalScripts: scripts.length,
+      });
+
+      return {
+        engine,
+        scriptType,
+        listEl,
+        scripts,
+        matchedScripts,
+        matchedIds: new Set(matchedScripts.map((script) => String(script?.id ?? '')).filter(Boolean)),
+      };
+    }
+
+    async function moveGroupScripts(groupContext, targetScope) {
+      if (!groupContext) throw new Error('未找到分组上下文');
+      if (targetScope === scope) return { movedCount: 0 };
+
+      const { engine, scripts, matchedScripts, matchedIds } = await getGroupRawScripts(groupContext, { requireScopedValidation: targetScope === 'scoped' });
+
+      if (targetScope === 'preset') {
+        await ensurePresetMoveAllowed(engine);
+      }
+
+      const sourceScripts = scripts.filter((script) => !matchedIds.has(String(script?.id ?? '')));
+      const targetScriptType = getRegexScopeType(targetScope, engine.SCRIPT_TYPES);
+      const currentTargetScripts = Array.isArray(engine.getScriptsByType(targetScriptType)) ? [...engine.getScriptsByType(targetScriptType)] : [];
+      const nextTargetScripts = currentTargetScripts.concat(matchedScripts.map((script) => ({ ...script })));
+
+      await persistScriptsForScope(engine, scope, sourceScripts);
+      await persistScriptsForScope(engine, targetScope, nextTargetScripts);
+      await triggerRegexUiRefresh();
+      return { movedCount: matchedScripts.length };
+    }
+
+    async function setGroupDisabled(groupContext, disabled) {
+      const { engine, scripts, matchedScripts, matchedIds, listEl } = await getGroupRawScripts(groupContext);
+      const groupKey = makeGroupKey(groupContext.group1, groupContext.group2);
+      const snapshot = groupDisabledSnapshots[groupKey] && typeof groupDisabledSnapshots[groupKey] === 'object'
+        ? groupDisabledSnapshots[groupKey]
+        : {};
+
+      const visualStateById = Object.fromEntries(
+        getGroupScriptItemEls(listEl, groupContext).map((itemEl) => {
+          const inputEl = itemEl?.querySelector?.('.disable_regex');
+          return [String(itemEl?.dataset?.regexScriptId || ''), inputEl instanceof HTMLInputElement ? !!inputEl.checked : false];
+        }).filter(([id]) => !!id)
+      );
+
+      const getDesiredDisabledForScript = (script) => {
+        const { keys } = getScriptGroupKeysFromName(script?.scriptName, { subgroupEnabled });
+        const activeOtherGroupKeys = getActiveDisabledGroupKeys(groupDisabledState, keys).filter((key) => key !== groupKey);
+        const preferredSnapshotState = findPreferredGroupSnapshotState(groupDisabledSnapshots, activeOtherGroupKeys, String(script?.id ?? ''));
+        if (preferredSnapshotState !== undefined) {
+          return preferredSnapshotState;
+        }
+        if (Object.prototype.hasOwnProperty.call(visualStateById, String(script?.id ?? ''))) {
+          return !!visualStateById[String(script?.id ?? '')];
+        }
+        return !!script?.disabled;
+      };
+
+      debugGroupState('set-group-disabled:start', {
+        scope,
+        groupContext,
+        disabled,
+        groupKey,
+        currentGroupDisabledState: groupDisabledState[groupKey],
+        currentSnapshot: snapshot,
+        visualStateById,
+        matchedScripts: summarizeRegexScriptStates(matchedScripts),
+        allScripts: summarizeRegexScriptStates(scripts),
+      });
+
+      let changedCount = 0;
+      const nextScripts = scripts.map((script) => {
+        const id = String(script?.id ?? '');
+        if (!matchedIds.has(id)) return script;
+
+        const { keys } = getScriptGroupKeysFromName(script?.scriptName, { subgroupEnabled });
+        const forcedByOtherGroups = isForcedDisabledByOtherGroups(groupDisabledState, keys, groupKey);
+
+        const nextDisabled = disabled
+          ? true
+          : (forcedByOtherGroups ? true : (Object.prototype.hasOwnProperty.call(snapshot, id) ? !!snapshot[id] : !!script.disabled));
+
+        if (!!script.disabled === nextDisabled) return script;
+        changedCount += 1;
+        return { ...script, disabled: nextDisabled };
+      });
+
+      const nextMatchedScripts = nextScripts.filter((script) => matchedIds.has(String(script?.id ?? '')));
+
+      if (disabled) {
+        groupDisabledSnapshots[groupKey] = Object.fromEntries(matchedScripts.map((script) => [String(script?.id ?? ''), getDesiredDisabledForScript(script)]));
+        groupDisabledState[groupKey] = true;
+      } else {
+        delete groupDisabledSnapshots[groupKey];
+        delete groupDisabledState[groupKey];
+      }
+
+      debugGroupState('set-group-disabled:before-persist', {
+        scope,
+        groupContext,
+        disabled,
+        groupKey,
+        changedCount,
+        nextMatchedScripts: summarizeRegexScriptStates(nextMatchedScripts),
+        nextAllScripts: summarizeRegexScriptStates(nextScripts),
+        nextGroupDisabledState: { ...groupDisabledState },
+        nextSnapshotForGroup: groupDisabledSnapshots[groupKey],
+      });
+
+      saveGroupDisabledSnapshots();
+      saveGroupDisabledState();
+      await persistScriptsForScope(engine, scope, nextScripts);
+
+      const scriptType = getRegexScopeType(scope, engine.SCRIPT_TYPES);
+      debugGroupState('set-group-disabled:readback-after-persist-before-refresh', {
+        scope,
+        groupContext,
+        disabled,
+        groupKey,
+        persistedMatchedScripts: summarizeRegexScriptStates(
+          (Array.isArray(engine.getScriptsByType(scriptType)) ? engine.getScriptsByType(scriptType) : [])
+            .filter((script) => matchedIds.has(String(script?.id ?? '')))
+        ),
+      });
+
+      await triggerRegexUiRefresh();
+
+      setTimeout(() => {
+        try {
+          const readbackScripts = Array.isArray(engine.getScriptsByType(scriptType)) ? engine.getScriptsByType(scriptType) : [];
+          debugGroupState('set-group-disabled:delayed-readback-after-refresh', {
+            scope,
+            groupContext,
+            disabled,
+            groupKey,
+            delayedMatchedScripts: summarizeRegexScriptStates(
+              readbackScripts.filter((script) => matchedIds.has(String(script?.id ?? '')))
+            ),
+          });
+        } catch (err) {
+          warn('delayed readback failed', err);
+        }
+      }, 300);
+
+      debugGroupState('set-group-disabled:after-persist', {
+        scope,
+        groupContext,
+        disabled,
+        groupKey,
+        changedCount,
+        affectedCount: matchedScripts.length,
+      });
+
+      return { changedCount, affectedCount: matchedScripts.length };
+    }
+
+    async function exportGroupScripts(groupContext) {
+      const { matchedScripts } = await getGroupRawScripts(groupContext);
+      const safeName = sanitizeFileName(groupContext.currentName) || `group-${Date.now()}`;
+      const fileName = `regex-${safeName}.json`;
+      downloadJsonFile(matchedScripts, fileName);
+      return { exportedCount: matchedScripts.length, fileName };
+    }
+
+    async function deleteGroupScripts(groupContext) {
+      const { engine, scripts, matchedScripts, matchedIds } = await getGroupRawScripts(groupContext);
+      const nextScripts = scripts.filter((script) => !matchedIds.has(String(script?.id ?? '')));
+      clearGroupStateKeys(groupContext);
+      await persistScriptsForScope(engine, scope, nextScripts);
+      await triggerRegexUiRefresh();
+      return { deletedCount: matchedScripts.length };
+    }
+
+    async function runGroupAction(groupContext, action) {
+      if (!groupContext || !action) return;
+
+      if (action === 'move-global') {
+        const confirmed = await confirmWithNativePopup(`Are you sure you want to move this regex script group to global?`);
+        if (!confirmed) return;
+        const result = await moveGroupScripts(groupContext, 'global');
+        transferGroupDisabledStateToScope(groupContext, 'global');
+        clearGroupStateKeys(groupContext);
+        if (result?.movedCount) toastSuccess(`已将 ${result.movedCount} 条脚本移至全局`);
+        return;
+      }
+
+      if (action === 'move-preset') {
+        const confirmed = await confirmWithNativePopup(`Are you sure you want to move this regex script group to preset?`);
+        if (!confirmed) return;
+        const result = await moveGroupScripts(groupContext, 'preset');
+        transferGroupDisabledStateToScope(groupContext, 'preset');
+        clearGroupStateKeys(groupContext);
+        if (result?.movedCount) toastSuccess(`已将 ${result.movedCount} 条脚本移至预设`);
+        return;
+      }
+
+      if (action === 'move-scoped') {
+        const confirmed = await confirmWithNativePopup(`Are you sure you want to move this regex script group to scoped?`);
+        if (!confirmed) return;
+        const result = await moveGroupScripts(groupContext, 'scoped');
+        transferGroupDisabledStateToScope(groupContext, 'scoped');
+        clearGroupStateKeys(groupContext);
+        if (result?.movedCount) toastSuccess(`已将 ${result.movedCount} 条脚本移至局部`);
+        return;
+      }
+
+      if (action === 'export-group') {
+        const result = await exportGroupScripts(groupContext);
+        toastSuccess(`已导出 ${result.exportedCount} 条脚本`);
+        return;
+      }
+
+      if (action === 'delete-group') {
+        const confirmed = await confirmWithNativePopup(`Are you sure you want to delete this regex script group?`);
+        if (!confirmed) return;
+        const result = await deleteGroupScripts(groupContext);
+        if (result?.deletedCount) toastSuccess(`已删除 ${result.deletedCount} 条脚本`);
+      }
+    }
+
+    async function promptRenameGroup(headerEl) {
+      const groupContext = getGroupHeaderContext(headerEl);
+      if (!groupContext) return;
+
+      if (groupContext.level === 1 && groupContext.group1 === UNGROUPED_GROUP_NAME) {
+        toastInfo('“未分组”没有固定前缀，暂不支持直接重命名');
+        return;
+      }
+
+      const promptLabel = groupContext.level === 1 ? '一级分组新名称' : '二级分组新名称';
+      const nextInput = await showNativeInputPopup(promptLabel, groupContext.currentName);
+      if (nextInput == null) return;
+
+      let newName = '';
+      try {
+        newName = normalizeGroupRenameInput(nextInput);
+      } catch (err) {
+        toastError(err?.message || '分组名称不合法');
+        return;
+      }
+
+      if (newName === groupContext.currentName) return;
+
+      try {
+        const result = await renameGroupScripts(groupContext, newName);
+        if (!result?.changedCount) {
+          toastInfo('没有检测到需要改名的脚本');
+          return;
+        }
+
+        remapGroupUiStateAfterRename(groupContext, newName);
+
+        const listEl = getScriptsListEl();
+        requestRegexScriptIdSync(listEl);
+        if (groupingEnabled && listEl?.isConnected) applyGrouping(listEl);
+        else if (listEl?.isConnected) {
+          syncItemOrderAndSnapshot(getScriptItemEls(listEl), { preferCurrent: true });
+          applyPlainSearchVisibility(listEl);
+        }
+
+        toastSuccess(`已重命名 ${result.changedCount} 条脚本`);
+      } catch (err) {
+        warn(`rename grouped scripts failed (${scope})`, err);
+        toastError(err?.message || '分组重命名失败');
+      }
     }
 
     function getScriptIdentityBaseKey(itemEl) {
@@ -1092,6 +2786,17 @@
     }
 
     function createGroupHeader({ level, group1, group2, title, count, order }) {
+      const createActionButton = ({ action, className, title: buttonTitle, iconClass }) => {
+        const buttonEl = document.createElement('div');
+        buttonEl.className = `${className} menu_button interactable`;
+        buttonEl.dataset.stRgsAction = action;
+        buttonEl.title = buttonTitle;
+        buttonEl.tabIndex = 0;
+        buttonEl.setAttribute('role', 'button');
+        buttonEl.innerHTML = `<i class="${iconClass}"></i>`;
+        return buttonEl;
+      };
+
       const el = document.createElement('div');
       el.className = level === 1 ? 'st-rgs-group-header' : 'st-rgs-subgroup-header';
       el.tabIndex = 0;
@@ -1103,6 +2808,7 @@
 
       const key = makeGroupKey(group1, group2);
       el.dataset.stRgsGroupKey = key;
+      el.dataset.stRgsGroupDisabled = groupDisabledState[key] ? '1' : '0';
 
       const arrow = document.createElement('span');
       arrow.className = 'st-rgs-group-arrow';
@@ -1112,6 +2818,7 @@
 
       const titleEl = document.createElement('span');
       titleEl.className = 'st-rgs-group-title';
+      titleEl.classList.toggle('st-rgs-group-title-disabled', !!groupDisabledState[key]);
       titleEl.textContent = title;
 
       const countEl = document.createElement('span');
@@ -1119,23 +2826,106 @@
       countEl.dataset.stRgsBaseCount = String(count);
       countEl.textContent = `(${count})`;
 
+      const toggleLabelEl = document.createElement('label');
+      toggleLabelEl.className = 'checkbox flex-container margin-r5 st-rgs-group-toggle-checkbox';
+      toggleLabelEl.dataset.stRgsIgnoreToggle = '1';
+      toggleLabelEl.title = '分组统一开关（占位，暂未接入真实逻辑）';
+      toggleLabelEl.innerHTML = `
+        <input type="checkbox" name="regex_disable" class="disable_regex st-rgs-group-disable-toggle" ${groupDisabledState[key] ? 'checked' : ''}>
+        <span class="regex-toggle-on fa-solid fa-toggle-on" title="禁用分组（占位）"></span>
+        <span class="regex-toggle-off fa-solid fa-toggle-off" title="启用分组（占位）"></span>
+      `;
+
+      const expandLabelEl = document.createElement('label');
+      expandLabelEl.className = 'menu_button regex_script_expand interactable st-rgs-group-expand';
+      expandLabelEl.dataset.stRgsIgnoreToggle = '1';
+      expandLabelEl.title = '显示更多分组操作';
+      expandLabelEl.innerHTML = `
+        <input type="checkbox" name="regex_expand">
+        <span class="fa-solid fa-ellipsis"></span>
+      `;
+
+      const nativeButtonsEl = document.createElement('div');
+      nativeButtonsEl.className = 'flex-container regex_script_buttons';
+      nativeButtonsEl.dataset.stRgsIgnoreToggle = '1';
+      nativeButtonsEl.append(
+        createActionButton({ action: 'move-global', className: 'move_to_global', title: '移至全局', iconClass: 'fa-solid fa-globe' }),
+        createActionButton({ action: 'move-preset', className: 'move_to_preset', title: '移至预设', iconClass: 'fa-solid fa-sliders' }),
+        createActionButton({ action: 'move-scoped', className: 'move_to_scoped', title: '移至局部', iconClass: 'fa-solid fa-address-card' }),
+        createActionButton({ action: 'export-group', className: 'export_regex', title: '导出分组', iconClass: 'fa-solid fa-file-export' })
+      );
+
+      const actionsEl = document.createElement('div');
+      actionsEl.className = 'flex-container flexnowrap st-rgs-group-native-actions';
+      actionsEl.dataset.stRgsIgnoreToggle = '1';
+      actionsEl.append(
+        toggleLabelEl,
+        expandLabelEl,
+        nativeButtonsEl,
+        createActionButton({ action: 'rename-group', className: 'edit_existing_regex', title: level === 1 ? '重命名一级分组' : '重命名二级分组', iconClass: 'fa-solid fa-pencil' }),
+        createActionButton({ action: 'delete-group', className: 'delete_regex', title: '删除分组', iconClass: 'fa-solid fa-trash' })
+      );
+
       // 一级组：图钉（置顶）
       if (level === 1 && group1 !== UNGROUPED_GROUP_NAME) {
         const pin = document.createElement('span');
-        pin.className = 'st-rgs-pin';
+        pin.className = 'st-rgs-pin menu_button interactable';
+        pin.dataset.stRgsIgnoreToggle = '1';
         pin.dataset.stRgsPin = '1';
         const pinned = pinnedGroup1List.includes(group1);
         pin.dataset.stRgsPinned = pinned ? '1' : '0';
         pin.title = pinned ? '取消置顶该分组' : '置顶该分组';
+        pin.tabIndex = 0;
+        pin.setAttribute('role', 'button');
         pin.innerHTML = '<i class="fa-solid fa-thumbtack"></i>';
-        el.append(arrow, titleEl, countEl, pin);
+        el.append(arrow, titleEl, countEl, pin, actionsEl);
       } else {
-        el.append(arrow, titleEl, countEl);
+        actionsEl.style.marginLeft = 'auto';
+        el.append(arrow, titleEl, countEl, actionsEl);
       }
 
       setFlexOrder(el, order);
 
       return el;
+    }
+
+    function togglePinnedGroup(headerEl) {
+      const group1 = headerEl?.dataset?.stRgsGroup1;
+      if (!group1 || group1 === UNGROUPED_GROUP_NAME) return;
+
+      pinnedGroup1List = loadPinnedGroups();
+      const idx = pinnedGroup1List.indexOf(group1);
+      if (idx >= 0) pinnedGroup1List.splice(idx, 1);
+      else pinnedGroup1List.unshift(group1);
+
+      saveJson(STORAGE_KEY_PINNED_GROUPS, pinnedGroup1List);
+
+      const listEl = getScriptsListEl();
+      if (listEl?.isConnected) applyGrouping(listEl);
+      toastInfo(idx >= 0 ? `已取消置顶：${group1}` : `已置顶：${group1}`);
+    }
+
+    async function handleGroupAction(actionEl) {
+      const action = String(actionEl?.dataset?.stRgsAction || '');
+      if (!action) return;
+
+      const headerEl = actionEl.closest?.('.st-rgs-group-header, .st-rgs-subgroup-header');
+      if (!headerEl) return;
+
+      const groupContext = getGroupHeaderContext(headerEl);
+      if (!groupContext) return;
+
+      if (action === 'rename-group') {
+        await promptRenameGroup(headerEl);
+        return;
+      }
+
+      try {
+        await runGroupAction(groupContext, action);
+      } catch (err) {
+        warn(`group action failed (${scope}:${action})`, err);
+        toastError(err?.message || `分组操作失败：${getScopeLabel(scope)}`);
+      }
     }
 
     function updateHeaderBulkButtonsState() {
@@ -1248,6 +3038,7 @@
         itemEl.classList.toggle(SEARCH_HIDDEN_CLASS, !matched);
       }
 
+      applyForcedDisabledUi(listEl);
       updateHeaderBulkButtonsState();
     }
 
@@ -1493,6 +3284,7 @@
         if (!groupingEnabled) return;
         const listEl = getScriptsListEl();
         if (!listEl || !listEl.isConnected) return;
+        requestRegexScriptIdSync(listEl);
         applyGrouping(listEl);
       });
     }
@@ -1508,6 +3300,7 @@
         itemOrderSyncPreferCurrent = false;
         const listEl = getScriptsListEl();
         if (!listEl || !listEl.isConnected) return;
+        requestRegexScriptIdSync(listEl);
         syncItemOrderAndSnapshot(getScriptItemEls(listEl), { preferCurrent });
         if (!groupingEnabled) {
           applyPlainSearchVisibility(listEl);
@@ -1595,27 +3388,34 @@
       listEl.addEventListener('click', (e) => {
         if (!listEl.classList.contains(GROUPING_CLASS)) return;
 
+        const ignoredEl = e.target?.closest?.('[data-st-rgs-ignore-toggle="1"]');
+        if (ignoredEl) {
+          if (ignoredEl.matches?.('.st-rgs-group-toggle-checkbox')) {
+            e.stopPropagation();
+            return;
+          }
+
+          if (ignoredEl.matches?.('.st-rgs-group-expand')) {
+            e.stopPropagation();
+            return;
+          }
+        }
+
+        const actionEl = e.target?.closest?.('[data-st-rgs-action]');
+        if (actionEl) {
+          e.preventDefault();
+          e.stopPropagation();
+          void handleGroupAction(actionEl);
+          return;
+        }
+
         // 图钉优先
         const pinEl = e.target?.closest?.('[data-st-rgs-pin]');
         if (pinEl) {
           const headerEl = pinEl.closest('.st-rgs-group-header');
-          const group1 = headerEl?.dataset?.stRgsGroup1;
-          if (!group1 || group1 === UNGROUPED_GROUP_NAME) return;
-
           e.preventDefault();
           e.stopPropagation();
-
-          // toggle pin
-          pinnedGroup1List = loadPinnedGroups();
-          const idx = pinnedGroup1List.indexOf(group1);
-          if (idx >= 0) pinnedGroup1List.splice(idx, 1);
-          else pinnedGroup1List.unshift(group1);
-
-          saveJson(STORAGE_KEY_PINNED_GROUPS, pinnedGroup1List);
-
-          // 仅重建顺序，不改真实脚本顺序
-          applyGrouping(listEl);
-          toastInfo(idx >= 0 ? `已取消置顶：${group1}` : `已置顶：${group1}`);
+          togglePinnedGroup(headerEl);
           return;
         }
 
@@ -1639,6 +3439,36 @@
         if (!listEl.classList.contains(GROUPING_CLASS)) return;
         if (e.key !== 'Enter' && e.key !== ' ') return;
 
+        const ignoredEl = e.target?.closest?.('[data-st-rgs-ignore-toggle="1"]');
+        if (ignoredEl) {
+          if (ignoredEl.matches?.('.st-rgs-group-toggle-checkbox')) {
+            e.stopPropagation();
+            return;
+          }
+
+          if (ignoredEl.matches?.('.st-rgs-group-expand')) {
+            e.stopPropagation();
+            return;
+          }
+        }
+
+        const actionEl = e.target?.closest?.('[data-st-rgs-action]');
+        if (actionEl) {
+          e.preventDefault();
+          e.stopPropagation();
+          void handleGroupAction(actionEl);
+          return;
+        }
+
+        const pinEl = e.target?.closest?.('[data-st-rgs-pin]');
+        if (pinEl) {
+          const headerEl = pinEl.closest('.st-rgs-group-header');
+          e.preventDefault();
+          e.stopPropagation();
+          togglePinnedGroup(headerEl);
+          return;
+        }
+
         const headerEl = e.target?.closest?.('.st-rgs-group-header, .st-rgs-subgroup-header');
         if (!headerEl) return;
 
@@ -1652,6 +3482,86 @@
         saveJson(STORAGE_KEY_GROUP_COLLAPSE, groupCollapseState);
 
         applyGroupVisibility(listEl);
+      });
+
+      listEl.addEventListener('input', (e) => {
+        const inputEl = e.target;
+        if (!(inputEl instanceof HTMLInputElement) || !inputEl.classList.contains('disable_regex')) return;
+
+        if (inputEl.classList.contains('st-rgs-group-disable-toggle')) return;
+
+        const itemEl = inputEl.closest('.regex-script-label');
+        if (!itemEl) return;
+
+        const groupContext = resolveItemGroupContext(itemEl, { subgroupEnabled });
+        if (!isForcedDisabledByAnyGroup(groupDisabledState, groupContext.keys)) return;
+
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+        e.stopPropagation();
+        e.preventDefault();
+
+        schedule(() => applyForcedDisabledUi(listEl));
+      }, true);
+
+      listEl.addEventListener('click', (e) => {
+        const controlEl = e.target?.closest?.('.regex-toggle-on, .regex-toggle-off');
+        if (!controlEl) return;
+
+        if (controlEl.closest?.('.st-rgs-group-toggle-checkbox[data-st-rgs-toggle-locked="1"]')) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
+
+        const itemEl = controlEl.closest?.('.regex-script-label');
+        if (!itemEl) return;
+
+        const groupContext = resolveItemGroupContext(itemEl, { subgroupEnabled });
+        if (!isForcedDisabledByAnyGroup(groupDisabledState, groupContext.keys)) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        schedule(() => applyForcedDisabledUi(listEl));
+      }, true);
+
+      listEl.addEventListener('change', async (e) => {
+        if (!listEl.classList.contains(GROUPING_CLASS)) return;
+
+        const toggleEl = e.target?.closest?.('.st-rgs-group-disable-toggle');
+        if (!toggleEl) return;
+
+        const headerEl = toggleEl.closest?.('.st-rgs-group-header, .st-rgs-subgroup-header');
+        const groupContext = getGroupHeaderContext(headerEl);
+        if (!groupContext) return;
+
+        const nextDisabled = !!toggleEl.checked;
+        toggleEl.disabled = true;
+
+        try {
+          debugGroupState('group-toggle-change-event', {
+            scope,
+            groupContext,
+            nextDisabled,
+          });
+
+          const result = await setGroupDisabled(groupContext, nextDisabled);
+          if (headerEl?.dataset) headerEl.dataset.stRgsGroupDisabled = nextDisabled ? '1' : '0';
+          const titleEl = headerEl?.querySelector?.('.st-rgs-group-title');
+          if (titleEl?.classList) titleEl.classList.toggle('st-rgs-group-title-disabled', nextDisabled);
+
+          const actionLabel = nextDisabled ? '关闭' : '恢复';
+          const count = Number(result?.affectedCount || 0);
+          toastSuccess(`已${actionLabel}${count} 条组内正则的状态`);
+        } catch (err) {
+          warn(`set group disabled failed (${scope})`, err);
+          toggleEl.checked = !nextDisabled;
+          toastError(err?.message || '分组开关操作失败');
+        } finally {
+          if (toggleEl?.isConnected) toggleEl.disabled = false;
+        }
+
+        requestRegexScriptIdSync(listEl);
       });
 
       // 分组模式下：拦截拖拽手柄的事件，避免触发原生排序
@@ -1777,6 +3687,7 @@
           return;
         }
 
+        requestRegexScriptIdSync(listEl);
         ensureScriptsListEventHandlers(listEl);
 
         if (listEl === observedScriptsListEl) return;
@@ -1821,6 +3732,7 @@
       startScriptsListWaitObserver();
       ensureScriptsListEventHandlers(listEl);
       startScriptsListObserver(listEl);
+      requestRegexScriptIdSync(listEl);
 
       if (groupingEnabled) {
         applyGrouping(listEl);
@@ -1849,6 +3761,8 @@
       // 每次尝试挂载时刷新设置（避免其他地方修改了 localStorage）
       subgroupEnabled = loadBool(STORAGE_KEY_SUBGROUP, true);
       collapsedState = loadBool(STORAGE_KEY_COLLAPSED, false);
+      groupDisabledState = loadJson(STORAGE_KEY_GROUP_DISABLED, {});
+      groupDisabledSnapshots = loadJson(STORAGE_KEY_GROUP_DISABLED_SNAPSHOT, {});
       itemOrderState = loadItemOrder();
 
       if (scope === 'global') ensureSearchBar();
