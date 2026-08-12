@@ -943,3 +943,19 @@
   text-align: center;
   opacity: 0.75;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .st-rgs-header .st-rgs-group-toggle,
+  .st-rgs-header .st-rgs-group-toggle .st-rgs-group-toggle-icon,
+  #st-rgs-quick-grouping-modal .st-rgs-qg-item {
+    transition: none;
+  }
+
+  .st-rgs-new-group,
+  .st-rgs-new-group-attention,
+  .st-rgs-new-item,
+  #st-rgs-quick-grouping-modal .st-rgs-qg-item.st-rgs-qg-item-updated {
+    animation: none;
+    transform: none;
+  }
+}

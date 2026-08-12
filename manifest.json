@@ -5,6 +5,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Qianzhuo",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "酒馆正则分组/批量开关/搜索 Collapse/expand SillyTavern Regex blocks, and optionally group scripts for easier browsing ."
 }

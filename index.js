@@ -73,7 +73,12 @@
   const quickGroupingSelections = { global: [], preset: [], scoped: [] };
   let regexPageHideObserver = null;
   let regexPageHideDocHandlersBound = false;
-  const GROUP_STATE_DEBUG_ENABLED = true;
+  let panelSettingsDocHandlersBound = false;
+  let cachedHideConfig = null;
+  let cachedHideConfigRaw = null;
+  let sharedSearchFrame = 0;
+  let pendingSharedSearchQuery = '';
+  const GROUP_STATE_DEBUG_ENABLED = false;
 
   function log(...args) {
     console.log(`[${MODULE_NAME}]`, ...args);
@@ -180,7 +185,24 @@
   }
 
   function loadHideConfig() {
-    return normalizeHideConfig(loadJson(REGEX_PAGE_HIDE_STORAGE_KEY, {}));
+    let raw = null;
+    try {
+      raw = localStorage.getItem(REGEX_PAGE_HIDE_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+
+    if (!cachedHideConfig || raw !== cachedHideConfigRaw) {
+      let parsed = {};
+      try {
+        parsed = raw ? JSON.parse(raw) : {};
+      } catch {
+        // ignore invalid external writes
+      }
+      cachedHideConfig = normalizeHideConfig(parsed);
+      cachedHideConfigRaw = raw;
+    }
+    return { ...cachedHideConfig };
   }
 
   function hashString(input) {
@@ -196,8 +218,24 @@
   }
 
   function saveHideConfig(config) {
-    saveJson(REGEX_PAGE_HIDE_STORAGE_KEY, normalizeHideConfig(config));
+    const normalized = normalizeHideConfig(config);
+    const raw = JSON.stringify(normalized);
+    cachedHideConfig = normalized;
+    cachedHideConfigRaw = raw;
+    try {
+      localStorage.setItem(REGEX_PAGE_HIDE_STORAGE_KEY, raw);
+    } catch {
+      // ignore
+    }
   }
+
+  window.addEventListener('storage', (event) => {
+    if (event.key !== REGEX_PAGE_HIDE_STORAGE_KEY && event.key !== null) return;
+    cachedHideConfig = null;
+    cachedHideConfigRaw = null;
+    syncRegexHideMenuInputs();
+    applyRegexPageHideConfig();
+  });
 
   function arrayShallowEqual(a, b) {
     if (a === b) return true;
@@ -216,8 +254,12 @@
     el.dataset.stRgsFlashToken = token;
 
     el.classList.remove(className);
-    void el.offsetWidth;
-    el.classList.add(className);
+    schedule(() => {
+      schedule(() => {
+        if (!el.isConnected || el.dataset.stRgsFlashToken !== token) return;
+        el.classList.add(className);
+      });
+    });
 
     setTimeout(() => {
       if (el.dataset.stRgsFlashToken !== token) return;
@@ -423,13 +465,30 @@
     return null;
   }
 
+  let regexUiRefreshPromise = null;
+  let regexUiRefreshPending = false;
+
   async function triggerRegexUiRefresh() {
-    const ctx = getCtx();
-    const eventTypes = getCtxEventTypes(ctx);
-    ctx?.saveSettingsDebounced?.();
-    ctx?.eventSource?.emit?.(eventTypes.PRESET_CHANGED);
-    ctx?.eventSource?.emit?.(eventTypes.SETTINGS_LOADED);
-    ctx?.reloadCurrentChat?.();
+    if (regexUiRefreshPromise) {
+      regexUiRefreshPending = true;
+      return regexUiRefreshPromise;
+    }
+
+    regexUiRefreshPromise = (async () => {
+      do {
+        regexUiRefreshPending = false;
+        const ctx = getCtx();
+        const eventTypes = getCtxEventTypes(ctx);
+        ctx?.saveSettingsDebounced?.();
+        if (eventTypes.PRESET_CHANGED) await ctx?.eventSource?.emit?.(eventTypes.PRESET_CHANGED);
+        if (eventTypes.SETTINGS_LOADED) await ctx?.eventSource?.emit?.(eventTypes.SETTINGS_LOADED);
+        await ctx?.reloadCurrentChat?.();
+      } while (regexUiRefreshPending);
+    })().finally(() => {
+      regexUiRefreshPromise = null;
+    });
+
+    return regexUiRefreshPromise;
   }
 
   let popupModulePromise = null;
@@ -592,11 +651,8 @@
     return normalizeSearchText(input).replace(/[\s\-‐‑‒–—―_./\\|【】\[\]()（）{}「」『』"'`~!@#$%^&*+=:;?,，。！？：；、<>《》]/g, '');
   }
 
-  function fuzzyMatches(text, query) {
-    const normalizedQuery = compactSearchText(query);
+  function fuzzyMatchesNormalized(normalizedText, normalizedQuery) {
     if (!normalizedQuery) return true;
-
-    const normalizedText = compactSearchText(text);
     if (!normalizedText) return false;
     if (normalizedText.includes(normalizedQuery)) return true;
 
@@ -635,6 +691,22 @@
     }
   }
 
+  function scheduleSharedSearchQuery(nextQuery) {
+    pendingSharedSearchQuery = String(nextQuery ?? '');
+    if (sharedSearchFrame) return;
+
+    const flush = () => {
+      sharedSearchFrame = 0;
+      setSharedSearchQuery(pendingSharedSearchQuery);
+    };
+
+    if (typeof window.requestAnimationFrame === 'function') {
+      sharedSearchFrame = window.requestAnimationFrame(flush);
+    } else {
+      sharedSearchFrame = window.setTimeout(flush, 16);
+    }
+  }
+
   function ensureSearchBar() {
     const globalBlockEl = document.getElementById('global_scripts_block');
     if (!globalBlockEl) return false;
@@ -654,7 +726,7 @@
       const clearBtn = searchBarEl.querySelector(`#${SEARCH_CLEAR_ID}`);
 
       inputEl?.addEventListener('input', () => {
-        setSharedSearchQuery(inputEl.value);
+        scheduleSharedSearchQuery(inputEl.value);
         if (clearBtn) clearBtn.disabled = !normalizeSearchText(inputEl.value);
       });
 
@@ -662,7 +734,7 @@
         if (!inputEl) return;
         inputEl.value = '';
         clearBtn.disabled = true;
-        setSharedSearchQuery('');
+        scheduleSharedSearchQuery('');
         inputEl.focus();
       });
     }
@@ -702,8 +774,10 @@
       const inputEl = menuEl.querySelector(`[data-st-rgs-hide-target="${target.key}"]`);
       const optionEl = menuEl.querySelector(`[data-st-rgs-hide-option="${target.key}"]`);
       if (!inputEl) continue;
-      inputEl.checked = !!config[target.key];
-      optionEl?.setAttribute('aria-checked', config[target.key] ? 'true' : 'false');
+      const checked = !!config[target.key];
+      if (inputEl.checked !== checked) inputEl.checked = checked;
+      const ariaChecked = checked ? 'true' : 'false';
+      if (optionEl?.getAttribute('aria-checked') !== ariaChecked) optionEl?.setAttribute('aria-checked', ariaChecked);
     }
   }
 
@@ -713,7 +787,10 @@
     const config = loadHideConfig();
     if (!Object.prototype.hasOwnProperty.call(config, targetKey)) return;
 
-    config[targetKey] = !!enabled;
+    const nextEnabled = !!enabled;
+    if (config[targetKey] === nextEnabled) return;
+
+    config[targetKey] = nextEnabled;
     saveHideConfig(config);
     syncRegexHideMenuInputs();
     applyRegexPageHideConfig();
@@ -729,12 +806,19 @@
     const triggerEl = document.getElementById(REGEX_PAGE_HIDE_BUTTON_ID);
     if (!menuEl || !triggerEl) return;
 
+    const currentlyOpen = !menuEl.classList.contains('st-rgs-hidden');
+    if (currentlyOpen === !!open) return;
+
     if (open) {
       syncRegexHideMenuInputs();
+      menuEl.style.visibility = 'hidden';
+      menuEl.classList.remove('st-rgs-hidden');
       positionRegexHideMenu(menuEl, triggerEl);
+      menuEl.style.visibility = '';
+    } else {
+      menuEl.classList.add('st-rgs-hidden');
     }
 
-    menuEl.classList.toggle('st-rgs-hidden', !open);
     triggerEl.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
@@ -745,16 +829,7 @@
   function positionRegexHideMenu(menuEl = document.getElementById(REGEX_PAGE_HIDE_MENU_ID), triggerEl = document.getElementById(REGEX_PAGE_HIDE_BUTTON_ID)) {
     if (!menuEl || !triggerEl) return;
 
-    const wasHidden = menuEl.classList.contains('st-rgs-hidden');
-    const previousVisibility = menuEl.style.visibility;
-
-    if (wasHidden) {
-      menuEl.classList.remove('st-rgs-hidden');
-      menuEl.style.visibility = 'hidden';
-    }
-
-    menuEl.style.left = '0px';
-    menuEl.style.top = '0px';
+    if (menuEl.classList.contains('st-rgs-hidden')) return;
 
     const triggerRect = triggerEl.getBoundingClientRect();
     const menuRect = menuEl.getBoundingClientRect();
@@ -775,13 +850,6 @@
 
     menuEl.style.left = `${Math.round(left)}px`;
     menuEl.style.top = `${Math.round(top)}px`;
-
-    if (wasHidden) {
-      menuEl.classList.add('st-rgs-hidden');
-      menuEl.style.visibility = previousVisibility;
-    } else {
-      menuEl.style.visibility = previousVisibility || '';
-    }
   }
 
   function applyRegexPageHideConfig() {
@@ -793,7 +861,9 @@
       if (!targetEl) continue;
 
       const shouldHide = !!config[target.key];
-      targetEl.classList.toggle(REGEX_PAGE_FORCE_HIDDEN_CLASS, shouldHide);
+      if (targetEl.classList.contains(REGEX_PAGE_FORCE_HIDDEN_CLASS) !== shouldHide) {
+        targetEl.classList.toggle(REGEX_PAGE_FORCE_HIDDEN_CLASS, shouldHide);
+      }
 
       if (target.category === 'toolbar' && !shouldHide) {
         visibleToolbarTargetCount += 1;
@@ -802,7 +872,10 @@
 
     const separatorEl = getRegexActionSeparatorEl();
     if (separatorEl) {
-      separatorEl.classList.toggle(REGEX_PAGE_FORCE_HIDDEN_CLASS, visibleToolbarTargetCount < 1);
+      const shouldHideSeparator = visibleToolbarTargetCount < 1;
+      if (separatorEl.classList.contains(REGEX_PAGE_FORCE_HIDDEN_CLASS) !== shouldHideSeparator) {
+        separatorEl.classList.toggle(REGEX_PAGE_FORCE_HIDDEN_CLASS, shouldHideSeparator);
+      }
     }
   }
 
@@ -929,60 +1002,68 @@
         openQuickGroupingModal();
       });
 
-      const stopMenuEvent = (e) => e.stopPropagation();
-      menuEl?.addEventListener('pointerdown', stopMenuEvent);
-      menuEl?.addEventListener('mousedown', stopMenuEvent);
-      menuEl?.addEventListener('mouseup', stopMenuEvent);
-      menuEl?.addEventListener('click', (e) => e.stopPropagation());
-      menuEl?.addEventListener('click', (e) => {
-        const optionEl = e.target?.closest?.('[data-st-rgs-hide-option]');
-        if (!optionEl) return;
-
-        e.preventDefault();
-        e.stopPropagation();
-        toggleRegexHideTarget(optionEl.dataset.stRgsHideOption);
-      });
-      menuEl?.addEventListener('keydown', (e) => {
-        const optionEl = e.target?.closest?.('[data-st-rgs-hide-option]');
-        if (!optionEl) {
+      if (menuEl && menuEl.dataset.stRgsHandlers !== '1') {
+        menuEl.dataset.stRgsHandlers = '1';
+        const stopMenuEvent = (e) => e.stopPropagation();
+        menuEl.addEventListener('pointerdown', stopMenuEvent);
+        menuEl.addEventListener('mousedown', stopMenuEvent);
+        menuEl.addEventListener('mouseup', stopMenuEvent);
+        menuEl.addEventListener('click', (e) => {
           e.stopPropagation();
-          return;
-        }
+          const optionEl = e.target?.closest?.('[data-st-rgs-hide-option]');
+          if (!optionEl) return;
 
-        if (e.key !== 'Enter' && e.key !== ' ') {
+          e.preventDefault();
+          toggleRegexHideTarget(optionEl.dataset.stRgsHideOption);
+        });
+        menuEl.addEventListener('keydown', (e) => {
+          const optionEl = e.target?.closest?.('[data-st-rgs-hide-option]');
+          if (!optionEl || (e.key !== 'Enter' && e.key !== ' ')) {
+            e.stopPropagation();
+            return;
+          }
+
+          e.preventDefault();
           e.stopPropagation();
-          return;
-        }
-
-        e.preventDefault();
-        e.stopPropagation();
-        toggleRegexHideTarget(optionEl.dataset.stRgsHideOption);
-      });
-      menuEl?.addEventListener('change', (e) => {
-        const inputEl = e.target?.closest?.('input[data-st-rgs-hide-target]');
-        if (!inputEl) return;
-        e.stopPropagation();
-        setRegexHideTargetEnabled(inputEl.dataset.stRgsHideTarget, !!inputEl.checked);
-      });
+          toggleRegexHideTarget(optionEl.dataset.stRgsHideOption);
+        });
+        menuEl.addEventListener('change', (e) => {
+          const inputEl = e.target?.closest?.('input[data-st-rgs-hide-target]');
+          if (!inputEl) return;
+          e.stopPropagation();
+          setRegexHideTargetEnabled(inputEl.dataset.stRgsHideTarget, !!inputEl.checked);
+        });
+      }
     }
 
     ensureRegexHideDocHandlers();
     syncRegexHideMenuInputs();
-    positionRegexHideMenu();
     applyRegexPageHideConfig();
     return true;
   }
 
   function startRegexHideObserver() {
     if (regexPageHideObserver) return;
+    ensureRegexHideControls();
     if (typeof MutationObserver !== 'function') return;
 
     const root = document.body || document.documentElement;
     if (!root) return;
 
+    const relevantSelector = [
+      `#${REGEX_PAGE_HIDE_WRAPPER_ID}`,
+      ...REGEX_PAGE_HIDE_TARGETS.map((target) => target.selector),
+    ].join(', ');
     let scheduled = false;
-    regexPageHideObserver = new MutationObserver(() => {
-      if (scheduled) return;
+    const isRelevantMutation = (mutation) => {
+      const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
+      return nodes.some((node) =>
+        node instanceof Element && (node.matches?.(relevantSelector) || node.querySelector?.(relevantSelector))
+      );
+    };
+
+    regexPageHideObserver = new MutationObserver((mutations) => {
+      if (scheduled || !mutations.some(isRelevantMutation)) return;
       scheduled = true;
       schedule(() => {
         scheduled = false;
@@ -990,6 +1071,7 @@
       });
     });
 
+    // 常驻但严格过滤：用于兼容工具栏被整体替换，不再对聊天等无关 DOM 做布局或全量 ensure。
     regexPageHideObserver.observe(root, { childList: true, subtree: true });
   }
 
@@ -1491,6 +1573,7 @@
         if (entry.titleEl instanceof HTMLElement) entry.titleEl.textContent = entry.item.name;
         renderQuickGroupingCurrentInfo(entry.subEl, entry.item);
         entry.searchText = `${entry.item.name}\n${entry.item.rawName}\n${entry.item.group1}\n${entry.item.group2}\n${getQuickGroupingLeafName(entry.item)}`;
+        entry.normalizedSearchText = compactSearchText(entry.searchText);
       };
 
       if (items.length > 0 && listEl instanceof HTMLElement) {
@@ -1548,6 +1631,7 @@
             titleEl,
             subEl,
             searchText: `${item.name}\n${item.rawName}\n${item.group1}\n${item.group2}\n${getQuickGroupingLeafName(item)}`,
+            normalizedSearchText: compactSearchText(`${item.name}\n${item.rawName}\n${item.group1}\n${item.group2}\n${getQuickGroupingLeafName(item)}`),
           });
         }
         refreshAutocompleteSuggestions();
@@ -1561,11 +1645,12 @@
 
       const applyFilter = () => {
         const query = filterInput instanceof HTMLInputElement ? filterInput.value : '';
+        const normalizedQuery = compactSearchText(query);
         quickGroupingDraftState.filter = query;
 
         let visibleCount = 0;
         for (const entry of rowEntries) {
-          const matched = !normalizeSearchText(query) || fuzzyMatches(entry.searchText, query);
+          const matched = fuzzyMatchesNormalized(entry.normalizedSearchText, normalizedQuery);
           entry.rowEl.classList.toggle('st-rgs-qg-item-hidden', !matched);
           if (matched) visibleCount += 1;
         }
@@ -1588,7 +1673,14 @@
         updateSelectAllButtonLabel();
       };
 
-      filterInput?.addEventListener('input', applyFilter);
+      let filterFrame = 0;
+      filterInput?.addEventListener('input', () => {
+        if (filterFrame) return;
+        filterFrame = window.requestAnimationFrame(() => {
+          filterFrame = 0;
+          applyFilter();
+        });
+      });
       group1Input?.addEventListener('input', () => { quickGroupingDraftState.group1 = group1Input.value; });
       group2Input?.addEventListener('input', () => { quickGroupingDraftState.group2 = group2Input.value; });
       format1Select?.addEventListener('change', () => { quickGroupingDraftState.format1 = normalizeQuickGroupingFormat(format1Select.value); });
@@ -1716,6 +1808,26 @@
   // Panel Controller (per block)
   // =====================
 
+  function ensurePanelSettingsDocHandlers() {
+    if (panelSettingsDocHandlersBound) return;
+    panelSettingsDocHandlersBound = true;
+
+    document.addEventListener('click', (e) => {
+      for (const menuEl of document.querySelectorAll('.st-rgs-settings-menu:not(.st-rgs-hidden)')) {
+        const settingsEl = menuEl.closest('.st-rgs-settings');
+        if (settingsEl?.contains(e.target)) continue;
+        menuEl.classList.add('st-rgs-hidden');
+      }
+    }, true);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      for (const menuEl of document.querySelectorAll('.st-rgs-settings-menu:not(.st-rgs-hidden)')) {
+        menuEl.classList.add('st-rgs-hidden');
+      }
+    }, true);
+  }
+
   function createPanelController({ scope, blockId, listId, titleText, preserveSelectors = [] }) {
     // 本插件注入的 header 按钮 ID（用于防重复）
     const HEADER_ID = `st-rgs-collapse-header-${scope}`;
@@ -1760,6 +1872,8 @@
     let groupDisabledSnapshots = loadJson(STORAGE_KEY_GROUP_DISABLED_SNAPSHOT, {});
     let collapsedState = loadBool(STORAGE_KEY_COLLAPSED, false);
     let searchQuery = getSharedSearchQuery();
+    let compactSearchQuery = compactSearchText(searchQuery);
+    const scriptSearchCache = new WeakMap();
 
     const loadItemOrder = () => {
       const val = loadJson(STORAGE_KEY_ITEM_ORDER, []);
@@ -1781,6 +1895,7 @@
 
     subscribeSharedSearch((nextQuery) => {
       searchQuery = String(nextQuery ?? '');
+      compactSearchQuery = compactSearchText(searchQuery);
 
       const blockEl = getBlockEl();
       if (blockEl) applyBlockCollapsedState(blockEl);
@@ -1835,7 +1950,7 @@
     // === block 折叠 ===
 
     function hasActiveSearchQuery() {
-      return !!normalizeSearchText(searchQuery);
+      return !!compactSearchQuery;
     }
 
     function applyBlockCollapsedState(blockEl) {
@@ -1881,7 +1996,13 @@
     }
 
     function itemMatchesSearch(itemEl) {
-      return fuzzyMatches(getScriptDisplayName(itemEl), searchQuery);
+      const displayName = getScriptDisplayName(itemEl);
+      let cached = scriptSearchCache.get(itemEl);
+      if (!cached || cached.displayName !== displayName) {
+        cached = { displayName, normalizedName: compactSearchText(displayName) };
+        scriptSearchCache.set(itemEl, cached);
+      }
+      return fuzzyMatchesNormalized(cached.normalizedName, compactSearchQuery);
     }
 
     function applyPlainSearchVisibility(listEl) {
@@ -2065,32 +2186,42 @@
         itemEl.dataset.stRgsRawScriptDisabled = rawScript.disabled ? '1' : '0';
       };
 
-      if (items.length === rawScripts.length) {
-        items.forEach((itemEl, index) => assignScriptMeta(itemEl, rawScripts[index]));
-        applyForcedDisabledUi(listEl);
-        return true;
+      const rawEntries = rawScripts.map((rawScript) => ({ rawScript, used: false }));
+      const entriesById = new Map();
+      const entriesByName = new Map();
+      for (const entry of rawEntries) {
+        const id = entry.rawScript?.id;
+        if (id !== undefined && id !== null) entriesById.set(String(id), entry);
+        const name = String(entry.rawScript?.scriptName || '');
+        if (!entriesByName.has(name)) entriesByName.set(name, []);
+        entriesByName.get(name).push(entry);
       }
 
-      const rawEntries = rawScripts.map((rawScript, index) => ({
-        rawScript,
-        index,
-        name: String(rawScript?.scriptName || ''),
-        used: false,
-      }));
-
       let assignedCount = 0;
+      const assignedItems = new WeakSet();
       for (const itemEl of items) {
-        const displayName = getScriptDisplayName(itemEl);
-        const matchedEntry = rawEntries.find((entry) => !entry.used && entry.name === displayName);
+        const itemId = String(itemEl?.id || itemEl?.dataset?.regexScriptId || '');
+        let matchedEntry = itemId ? entriesById.get(itemId) : null;
+        if (matchedEntry?.used) matchedEntry = null;
+
+        if (!matchedEntry) {
+          const queue = entriesByName.get(getScriptDisplayName(itemEl));
+          while (queue?.[0]?.used) queue.shift();
+          matchedEntry = queue?.shift() || null;
+        }
+
         if (!matchedEntry) continue;
         matchedEntry.used = true;
+        assignedItems.add(itemEl);
         assignScriptMeta(itemEl, matchedEntry.rawScript);
         assignedCount += 1;
       }
 
+      const remainingEntries = rawEntries.filter((entry) => !entry.used);
+      let remainingIndex = 0;
       for (const itemEl of items) {
-        if (itemEl?.dataset?.regexScriptId) continue;
-        const nextEntry = rawEntries.find((entry) => !entry.used);
+        if (assignedItems.has(itemEl)) continue;
+        const nextEntry = remainingEntries[remainingIndex++];
         if (!nextEntry) break;
         nextEntry.used = true;
         assignScriptMeta(itemEl, nextEntry.rawScript);
@@ -2432,36 +2563,21 @@
       saveGroupDisabledState();
       await persistScriptsForScope(engine, scope, nextScripts);
 
-      const scriptType = getRegexScopeType(scope, engine.SCRIPT_TYPES);
-      debugGroupState('set-group-disabled:readback-after-persist-before-refresh', {
-        scope,
-        groupContext,
-        disabled,
-        groupKey,
-        persistedMatchedScripts: summarizeRegexScriptStates(
-          (Array.isArray(engine.getScriptsByType(scriptType)) ? engine.getScriptsByType(scriptType) : [])
-            .filter((script) => matchedIds.has(String(script?.id ?? '')))
-        ),
-      });
+      if (GROUP_STATE_DEBUG_ENABLED) {
+        const scriptType = getRegexScopeType(scope, engine.SCRIPT_TYPES);
+        debugGroupState('set-group-disabled:readback-after-persist-before-refresh', {
+          scope,
+          groupContext,
+          disabled,
+          groupKey,
+          persistedMatchedScripts: summarizeRegexScriptStates(
+            (Array.isArray(engine.getScriptsByType(scriptType)) ? engine.getScriptsByType(scriptType) : [])
+              .filter((script) => matchedIds.has(String(script?.id ?? '')))
+          ),
+        });
+      }
 
       await triggerRegexUiRefresh();
-
-      setTimeout(() => {
-        try {
-          const readbackScripts = Array.isArray(engine.getScriptsByType(scriptType)) ? engine.getScriptsByType(scriptType) : [];
-          debugGroupState('set-group-disabled:delayed-readback-after-refresh', {
-            scope,
-            groupContext,
-            disabled,
-            groupKey,
-            delayedMatchedScripts: summarizeRegexScriptStates(
-              readbackScripts.filter((script) => matchedIds.has(String(script?.id ?? '')))
-            ),
-          });
-        } catch (err) {
-          warn('delayed readback failed', err);
-        }
-      }, 300);
 
       debugGroupState('set-group-disabled:after-persist', {
         scope,
@@ -2588,6 +2704,7 @@
 
     function getScriptIdentityBaseKey(itemEl) {
       const explicitId = [
+        itemEl?.id,
         itemEl?.dataset?.scriptId,
         itemEl?.dataset?.regexScriptId,
         itemEl?.dataset?.regexId,
@@ -2596,7 +2713,6 @@
         itemEl?.getAttribute?.('data-regex-script-id'),
         itemEl?.getAttribute?.('data-regex-id'),
         itemEl?.getAttribute?.('data-id'),
-        itemEl?.id,
       ].find((value) => !!value);
 
       if (explicitId) return `id:${String(explicitId).trim()}`;
@@ -2731,6 +2847,28 @@
 
     let lastKnownItemOrderKeys = null;
     let lastKnownGroupKeys = null;
+    let lastGroupingRenderSignature = '';
+    let nextScriptNodeToken = 1;
+    const scriptNodeTokens = new WeakMap();
+
+    function getScriptNodeToken(itemEl) {
+      if (!scriptNodeTokens.has(itemEl)) scriptNodeTokens.set(itemEl, nextScriptNodeToken++);
+      return scriptNodeTokens.get(itemEl);
+    }
+
+    function buildGroupingRenderSignature(entries) {
+      const itemSignature = entries.map((entry) => [
+        getScriptNodeToken(entry.el),
+        entry.orderKey,
+        getScriptDisplayName(entry.el),
+      ]);
+      return JSON.stringify([
+        subgroupEnabled,
+        pinnedGroup1List,
+        groupDisabledState,
+        itemSignature,
+      ]);
+    }
 
     function buildGroupingSnapshot(entries) {
       const itemOrderKeys = [];
@@ -2901,7 +3039,7 @@
       saveJson(STORAGE_KEY_PINNED_GROUPS, pinnedGroup1List);
 
       const listEl = getScriptsListEl();
-      if (listEl?.isConnected) applyGrouping(listEl);
+      if (listEl?.isConnected) applyGrouping(listEl, { force: true });
       toastInfo(idx >= 0 ? `已取消置顶：${group1}` : `已置顶：${group1}`);
     }
 
@@ -3072,18 +3210,26 @@
 
     let rebuilding = false;
     let rebuildScheduled = false;
+    let rebuildNeedsIdSync = false;
     let itemOrderSyncScheduled = false;
     let itemOrderSyncPreferCurrent = false;
 
-    function applyGrouping(listEl) {
+    function applyGrouping(listEl, { force = false } = {}) {
       if (!listEl) return;
+
+      pinnedGroup1List = loadPinnedGroups();
+      const orderedEntries = getOrderedScriptEntries(listEl);
+      const renderSignature = buildGroupingRenderSignature(orderedEntries);
+      if (!force && listEl.classList.contains(GROUPING_CLASS) && renderSignature === lastGroupingRenderSignature) {
+        applyGroupVisibility(listEl);
+        return;
+      }
 
       rebuilding = true;
       try {
         // 清空旧状态后重建
         cleanupGroupingArtifacts(listEl);
 
-        const orderedEntries = getOrderedScriptEntries(listEl);
         const snapshot = buildGroupingSnapshot(orderedEntries);
         const previousItemKeySet = Array.isArray(lastKnownItemOrderKeys) ? new Set(lastKnownItemOrderKeys) : null;
         const previousGroupKeySet = Array.isArray(lastKnownGroupKeys) ? new Set(lastKnownGroupKeys) : null;
@@ -3097,6 +3243,7 @@
 
         if (orderedEntries.length === 0) {
           storeGroupingSnapshot(snapshot);
+          lastGroupingRenderSignature = renderSignature;
           return;
         }
 
@@ -3105,9 +3252,6 @@
         // 收集分组信息（按 DOM 顺序，保证“首次出现顺序”稳定）
         const groupOrder = [];
         const groupDataMap = new Map();
-
-        // 每次重建时刷新置顶列表（可能在别处被更新）
-        pinnedGroup1List = loadPinnedGroups();
 
         function ensureGroupData(group1) {
           if (!groupDataMap.has(group1)) {
@@ -3270,21 +3414,25 @@
 
         applyGroupVisibility(listEl);
         storeGroupingSnapshot(snapshot);
+        lastGroupingRenderSignature = renderSignature;
       } finally {
         rebuilding = false;
       }
     }
 
-    function scheduleGroupingRebuild() {
+    function scheduleGroupingRebuild({ syncIds = false } = {}) {
+      if (syncIds) rebuildNeedsIdSync = true;
       if (rebuildScheduled) return;
       rebuildScheduled = true;
 
       schedule(() => {
+        const shouldSyncIds = rebuildNeedsIdSync;
         rebuildScheduled = false;
+        rebuildNeedsIdSync = false;
         if (!groupingEnabled) return;
         const listEl = getScriptsListEl();
         if (!listEl || !listEl.isConnected) return;
-        requestRegexScriptIdSync(listEl);
+        if (shouldSyncIds) requestRegexScriptIdSync(listEl);
         applyGrouping(listEl);
       });
     }
@@ -3583,6 +3731,7 @@
     let observedScriptsListEl = null;
 
     function startScriptsListObserver(listEl) {
+      if (listEl === observedScriptsListEl && scriptsListObserver) return;
       stopScriptsListObserver();
 
       if (!listEl || typeof MutationObserver !== 'function') return;
@@ -3610,12 +3759,20 @@
       scriptsListObserver = new MutationObserver((mutations) => {
         let needRebuild = false;
         let needOrderSync = false;
+        let needIdSync = false;
 
         for (const m of mutations) {
           if (isWithinGroupHeader(m.target)) continue;
 
           if (m.type === 'childList') {
-            // 只关心列表容器自身的直接 children 变动（新增/删除脚本）。
+            // jQuery/textContent 更新脚本名时通常替换 Text 节点，产生的是 childList 而非 characterData。
+            if (isWithinScriptName(m.target)) {
+              needRebuild = groupingEnabled;
+              needOrderSync = !groupingEnabled;
+              break;
+            }
+
+            // 列表容器直接 children 变动表示新增/删除/重建脚本。
             if (m.target !== listEl) continue;
 
             const nodes = [...m.addedNodes, ...m.removedNodes];
@@ -3624,12 +3781,14 @@
               if (isScriptItemEl(n)) {
                 needRebuild = groupingEnabled;
                 needOrderSync = !groupingEnabled;
+                needIdSync = true;
                 break;
               }
               // 其它元素（非组 header）的增删也可能影响布局，保险起见也重建
               if (n?.nodeType === 1) {
                 needRebuild = groupingEnabled;
                 needOrderSync = !groupingEnabled;
+                needIdSync = true;
                 break;
               }
             }
@@ -3645,7 +3804,7 @@
 
         if (groupingEnabled) {
           if (!needRebuild) return;
-          scheduleGroupingRebuild();
+          scheduleGroupingRebuild({ syncIds: needIdSync });
           return;
         }
 
@@ -3672,10 +3831,10 @@
     function startScriptsListWaitObserver() {
       if (scriptsListWaitObserver || typeof MutationObserver !== 'function') return;
 
-
-      const root = getBlockEl() || document.body || document.documentElement;
+      const root = getBlockEl()?.parentElement || document.body || document.documentElement;
       if (!root) return;
 
+      const relevantSelector = `#${blockId}, #${listId}`;
       let scheduled = false;
 
       const syncCurrentList = () => {
@@ -3687,11 +3846,11 @@
           return;
         }
 
-        requestRegexScriptIdSync(listEl);
         ensureScriptsListEventHandlers(listEl);
 
         if (listEl === observedScriptsListEl) return;
 
+        requestRegexScriptIdSync(listEl);
         startScriptsListObserver(listEl);
 
         if (groupingEnabled) applyGrouping(listEl);
@@ -3703,8 +3862,14 @@
         updateHeaderBulkButtonsState();
       };
 
-      scriptsListWaitObserver = new MutationObserver(() => {
-        if (scheduled) return;
+      scriptsListWaitObserver = new MutationObserver((mutations) => {
+        const observedListDisconnected = !!observedScriptsListEl && !observedScriptsListEl.isConnected;
+        const relevantMutation = mutations.some((mutation) =>
+          [...mutation.addedNodes, ...mutation.removedNodes].some((node) =>
+            node instanceof Element && (node.matches?.(relevantSelector) || node.querySelector?.(relevantSelector))
+          )
+        );
+        if (scheduled || (!observedListDisconnected && !relevantMutation)) return;
         scheduled = true;
         schedule(() => {
           scheduled = false;
@@ -3714,12 +3879,6 @@
 
       scriptsListWaitObserver.observe(root, { childList: true, subtree: true });
       syncCurrentList();
-    }
-
-    function stopScriptsListWaitObserver() {
-      if (!scriptsListWaitObserver) return;
-      scriptsListWaitObserver.disconnect();
-      scriptsListWaitObserver = null;
     }
 
     function ensureGroupingMounted() {
@@ -3868,11 +4027,6 @@
       const settingsMenu = header.querySelector(`#${SETTINGS_MENU_ID}`);
       const subgroupToggle = header.querySelector(`#${SUBGROUP_TOGGLE_ID}`);
 
-      const closeSettingsMenu = () => {
-        if (!settingsMenu) return;
-        settingsMenu.classList.add('st-rgs-hidden');
-      };
-
       const toggleSettingsMenu = () => {
         if (!settingsMenu) return;
         settingsMenu.classList.toggle('st-rgs-hidden');
@@ -3897,34 +4051,13 @@
           // 开关变化时，如果正在分组展示，则立即重建
           if (groupingEnabled) {
             const listEl = getScriptsListEl();
-            if (listEl) applyGrouping(listEl);
+            if (listEl) applyGrouping(listEl, { force: true });
           }
         });
       }
 
-      // 点击空白处关闭设置菜单
-      const docCloseHandler = (e) => {
-        if (!settingsMenu || !settingsBtn || !settingsMenu.isConnected || !settingsBtn.isConnected) {
-          document.removeEventListener('click', docCloseHandler, true);
-          document.removeEventListener('keydown', docEscHandler, true);
-          return;
-        }
-
-        if (settingsMenu.classList.contains('st-rgs-hidden')) return;
-
-        const inMenu = e.target?.closest?.(`#${SETTINGS_MENU_ID}`);
-        const inBtn = e.target?.closest?.(`#${SETTINGS_BTN_ID}`);
-        if (inMenu || inBtn) return;
-
-        closeSettingsMenu();
-      };
-
-      const docEscHandler = (e) => {
-        if (e.key === 'Escape') closeSettingsMenu();
-      };
-
-      document.addEventListener('click', docCloseHandler, true);
-      document.addEventListener('keydown', docEscHandler, true);
+      // 所有面板复用一组 document handlers，避免面板重建时累积监听器。
+      ensurePanelSettingsDocHandlers();
 
       expandAllBtn?.addEventListener('click', (e) => {
         e.preventDefault();
@@ -4053,7 +4186,8 @@
     ];
 
     const tryEnsureAll = () => {
-      ensureRegexHideControls();
+      // 工具栏通常只挂载一次；若某版本将其整体替换，则重新启动一次性等待 observer。
+      startRegexHideObserver();
       for (const c of controllers) {
         c.tryEnsure();
       }
